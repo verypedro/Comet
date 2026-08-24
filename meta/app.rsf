@@ -1,0 +1,169 @@
+BasicInfo:
+  Title                   : Comet
+  CompanyCode             : "00"
+  ProductCode             : CTR-P-CMET
+  ContentType             : Application
+  Logo                    : Homebrew
+
+RomFs:
+  RootPath                : romfs
+
+TitleInfo:
+  UniqueId                : 0xFF3AA   # devkitPro's "evaluation/prototype" homebrew range
+                                        # (0xFF000-0xFF3FF); change this if it ever collides
+                                        # with another homebrew CIA you have installed.
+  Category                : Application
+
+Option:
+  UseOnSD                 : true    # install to SD, not NAND
+  FreeProductCode         : true    # lifts the normal CTR-P-XXXX restriction
+  MediaFootPadding        : false
+  EnableCrypt             : false   # unsigned/unencrypted -- fine under Luma3DS's patched checks
+  EnableCompress          : true
+
+AccessControlInfo:
+  CoreVersion                   : 2
+  DescVersion                   : 2
+
+  ReleaseKernelMajor             : "02"
+  ReleaseKernelMinor             : "46"
+
+  UseExtSaveData                 : false
+
+  # Filesystem permissions Comet actually needs: reading Luma's
+  # screenshots directory and writing to the Camera album's DCIM
+  # folder, both on the SD card.
+  FileSystemAccess:
+    - CategorySystemApplication
+    - CategoryHardwareCheck
+    - DirectSdmc
+    - DirectSdmcWrite
+    - Core
+
+  IoAccessControl:
+    - FsMountNand
+    - FsMountTwln
+    - FsMountWnand
+    - FsMountCardSpi
+    - UseSdif3
+
+  MemoryType                    : Application
+  SystemMode                    : 64MB
+  IdealProcessor                 : 0
+  AffinityMask                   : 1
+  Priority                       : 16
+  HandleTableSize                 : 0x200
+  DisableDebug                   : false
+  EnableForceDebug                : false
+  CanWriteSharedPage              : true
+  CanUsePrivilegedPriority        : false
+  CanUseNonAlphabetAndNumber      : true
+  PermitMainFunctionArgument      : true
+  CanShareDeviceMemory            : true
+  RunnableOnSleep                 : false
+  SpecialMemoryArrange            : true
+
+  SystemModeExt                  : Legacy
+  CpuSpeed                        : 268MHz
+  EnableL2Cache                   : false
+  CanAccessCore2                  : false
+
+  IORegisterMapping:
+    - 1ff00000-1ff7ffff   # DSP memory -- needed for ndsp (SFX)
+
+  MemoryMapping:
+    - 1f000000-1f5fffff:r  # VRAM
+
+  # Services Comet actually calls: filesystem, graphics, input, and
+  # audio (ndsp, added for SFX). apt/cfg/ptm are baseline services
+  # nearly every app needs for lifecycle/config/power-state handling.
+  ServiceAccessControl:
+    - APT:U
+    - ac:u
+    - am:net
+    - cfg:u
+    - csnd:SND
+    - dsp::DSP
+    - fs:USER
+    - gsp::Gpu
+    - gsp::Lcd
+    - hid:USER
+    - ir:rst
+    - ir:u
+    - ndm:u
+    - ptm:sysm
+    - ptm:u
+    - soc:U
+
+  SystemCallAccess:
+    ControlMemory: 1
+    QueryMemory: 2
+    ExitProcess: 3
+    GetProcessAffinityMask: 4
+    SetProcessAffinityMask: 5
+    GetProcessIdealProcessor: 6
+    SetProcessIdealProcessor: 7
+    CreateThread: 8
+    ExitThread: 9
+    SleepThread: 10
+    GetThreadPriority: 11
+    SetThreadPriority: 12
+    GetThreadAffinityMask: 13
+    SetThreadAffinityMask: 14
+    GetThreadIdealProcessor: 15
+    GetCurrentProcessorNumber: 17
+    Run: 18
+    CreateMutex: 19
+    ReleaseMutex: 20
+    CreateSemaphore: 21
+    ReleaseSemaphore: 22
+    CreateEvent: 23
+    SignalEvent: 24
+    ClearEvent: 25
+    CreateTimer: 26
+    SetTimer: 27
+    CancelTimer: 28
+    ClearTimer: 29
+    CreateMemoryBlock: 30
+    MapMemoryBlock: 31
+    UnmapMemoryBlock: 32
+    CreateAddressArbiter: 33
+    ArbitrateAddress: 34
+    CloseHandle: 35
+    WaitSynchronization1: 36
+    WaitSynchronizationN: 37
+    SignalAndWait: 38
+    DuplicateHandle: 39
+    GetSystemTick: 40
+    GetHandleInfo: 41
+    GetSystemInfo: 42
+    GetProcessInfo: 43
+    GetThreadInfo: 44
+    ConnectToPort: 45
+    SendSyncRequest1: 46
+    SendSyncRequest2: 47
+    SendSyncRequest3: 48
+    SendSyncRequest4: 49
+    SendSyncRequest: 50
+    GetProcessId: 53
+    GetProcessIdOfThread: 54
+    GetThreadId: 55
+    GetResourceLimit: 56
+    GetResourceLimitLimitValues: 57
+    GetResourceLimitCurrentValues: 58
+    Break: 60
+    OutputDebugString: 61
+    CreatePort: 71
+    CreateSessionToPort: 72
+    CreateSession: 73
+    AcceptSession: 74
+    ReplyAndReceive1: 75
+    ReplyAndReceive2: 76
+    ReplyAndReceive3: 77
+    ReplyAndReceive4: 78
+    ReplyAndReceive: 79
+
+SystemControlInfo:
+  SaveDataSize: 0KB     # Comet has no savedata of its own
+  RemasterVersion: 0
+  StackSize: 0x40000

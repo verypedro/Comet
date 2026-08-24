@@ -5,7 +5,7 @@ Browse everything in a grid, preview in real stereoscopic 3D, filter
 by type or date, and copy to 3D Album or delete individually or in batches.
 
 Named after the Comet Observatory from *Super Mario Galaxy*, keeping
-with the Luma/Rosalina naming theme. Inspired by the Nintendo Switch Album.
+with the Luma/Rosalina naming theme.
 
 ![Comet banner](meta/banner.png)
 
@@ -32,8 +32,7 @@ with the Luma/Rosalina naming theme. Inspired by the Nintendo Switch Album.
 - **Filter** by All / 3D Only / 2D Only, or drill into a specific
   Year → Month → Day
 - Peek at Luma's bottom-screen capture alongside any screenshot
-- A visual style modeled on the Switch's Album app, right down to
-  sound effects for key actions
+- A visual style inspired by the Switch's Album app.
 
   <img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/d357ba9c-d428-4e49-962e-abca0d6f6afe" /> <img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/da20f5a7-3bfa-4b93-8170-98d2e0637971" /> <img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/c160b0ea-9441-4439-8151-b0e64f8909f5" />
 

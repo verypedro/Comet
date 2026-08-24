@@ -1,11 +1,11 @@
 # Comet
 
-An all-in-one 3DS screenshot manager for Luma3DS/Rosalina captures —
-browse everything in a grid, preview in real stereoscopic 3D, filter
-by type or date, and copy or delete individually or in batches.
+An all-in-one 3DS screenshot manager for Luma3DS/Rosalina captures.
+Browse everything in a grid, preview in real stereoscopic 3D, filter
+by type or date, and copy to 3D Album or delete individually or in batches.
 
 Named after the Comet Observatory from *Super Mario Galaxy*, keeping
-with the Luma/Rosalina naming theme.
+with the Luma/Rosalina naming theme. Inspired by the Nintendo Switch Album.
 
 ![Comet banner](meta/banner.png)
 

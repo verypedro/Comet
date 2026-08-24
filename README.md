@@ -7,7 +7,9 @@ by type or date, and copy to 3D Album or delete individually or in batches.
 Named after the Comet Observatory from *Super Mario Galaxy*, keeping
 with the Luma/Rosalina naming theme.
 
+<div align="center">
 ![Comet banner](meta/banner.png)
+</div>
 
 <!--
   Add screenshots here! A few real ones from a 3DS (or Citra) go a
@@ -34,8 +36,9 @@ with the Luma/Rosalina naming theme.
 - Peek at Luma's bottom-screen capture alongside any screenshot
 - A visual style inspired by the Switch's Album app.
 
+<div align="center">
   <img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/d357ba9c-d428-4e49-962e-abca0d6f6afe" /> <img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/da20f5a7-3bfa-4b93-8170-98d2e0637971" /> <img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/c160b0ea-9441-4439-8151-b0e64f8909f5" />
-
+</div>
 
 ## Installing
 

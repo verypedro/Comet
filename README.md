@@ -7,9 +7,8 @@ by type or date, and copy to 3D Album or delete individually or in batches.
 Named after the Comet Observatory from *Super Mario Galaxy*, keeping
 with the Luma/Rosalina naming theme.
 
-<div align="center">
 ![Comet banner](meta/banner.png)
-</div>
+
 
 <!--
   Add screenshots here! A few real ones from a 3DS (or Citra) go a

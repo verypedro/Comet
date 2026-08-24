@@ -56,7 +56,7 @@ See [BUILDING.md](BUILDING.md) for full toolchain setup and build
 instructions (both `.3dsx` and `.cia`).
 
 ## Credits
-- Coded with [Claude](https://claude.ai/)
+- Coded with [Claude](https://claude.ai/) by Anthropic
 - Built with [devkitPro](https://devkitpro.org/)/libctru/citro2d/citro3d
 - Body font: [Poppins](https://fonts.google.com/specimen/Poppins) by
   Indian Type Foundry (SIL Open Font License)

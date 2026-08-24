@@ -35,7 +35,7 @@ with the Luma/Rosalina naming theme.
 - A visual style modeled on the Switch's Album app, right down to
   sound effects for key actions
 
-  <img width="400" height="480" alt="image" src="https://github.com/user-attachments/assets/d357ba9c-d428-4e49-962e-abca0d6f6afe" /> <img width="400" height="480" alt="image" src="https://github.com/user-attachments/assets/da20f5a7-3bfa-4b93-8170-98d2e0637971" /> <img width="400" height="480" alt="image" src="https://github.com/user-attachments/assets/c160b0ea-9441-4439-8151-b0e64f8909f5" />
+  <img width="300" height="360" alt="image" src="https://github.com/user-attachments/assets/d357ba9c-d428-4e49-962e-abca0d6f6afe" /> <img width="300" height="360" alt="image" src="https://github.com/user-attachments/assets/da20f5a7-3bfa-4b93-8170-98d2e0637971" /> <img width="300" height="360" alt="image" src="https://github.com/user-attachments/assets/c160b0ea-9441-4439-8151-b0e64f8909f5" />
 
 
 ## Installing

@@ -8,7 +8,7 @@ Named after the Comet Observatory from *Super Mario Galaxy*, keeping
 with the Luma/Rosalina naming theme.
 
 <div align="center">
-<img width="355" height="153" alt="image" src="https://github.com/user-attachments/assets/fd7f86b5-7906-4c9b-9dd8-b0b2343f87e5" />
+![Comet banner](meta/banner.png)
 </div>
 
 <!--

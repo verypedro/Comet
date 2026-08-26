@@ -10,30 +10,26 @@ with the Luma/Rosalina naming theme.
 
 ![Comet banner](meta/banner.png)
 
-<!--
-  Add screenshots here! A few real ones from a 3DS (or Citra) go a
-  long way — the grid view, the stereo preview, the filter menu are
-  all good candidates. Something like:
-
-  | Grid | 3D Preview | Filters |
-  |------|------------|---------|
-  | ![grid](docs/screenshot-grid.png) | ![preview](docs/screenshot-preview.png) | ![filters](docs/screenshot-filters.png) |
--->
+<div align="center">
+<img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/17582ce9-4958-419d-b5f2-eead40566f2b" />
+<img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/9e87b119-1054-4543-8ef2-6d9b632de473" />
+<img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/e8720f44-a40c-46d2-99e3-4d22ec27e354" />
+</div>
 
 ## Features
 
-- **Grid browsing** — a real 4×4 grid of thumbnails, not a list, with
+- **Grid browsing:** a real 4×4 grid of thumbnails, not a list, with
   both D-Pad and touch navigation
-- **Live stereo 3D preview** — the top screen shows whatever's
+- **Live stereo 3D preview:** the top screen shows whatever's
   highlighted, in real glasses-free 3D for 3D-capable screenshots
-- **Copy to the 3DS Camera album** — writes proper `.MPO` files for 3D
+- **Copy to the 3DS Camera album:** writes proper `.MPO` files for 3D
   pairs (with the MPF/EXIF tags the Camera app actually checks for)
   and plain `.JPG` for 2D screenshots, individually or in batch
 - **Delete**, individually or in batch, always with a confirmation step
 - **Filter** by All / 3D Only / 2D Only, or drill into a specific
   Year → Month → Day
 - Peek at Luma's bottom-screen capture alongside any screenshot
-- **DS mode** — press L+R to switch to browsing DS screenshots taken
+- **DS mode:** press L+R to switch to browsing DS screenshots taken
   with nds-bootstrap/TWiLightMenu++. Reads `screenshots.tar` directly,
   with separate tabs for what's still in the tar and what's already
   extracted to SD — view, filter, copy, and delete from either, with
@@ -48,12 +44,12 @@ with the Luma/Rosalina naming theme.
 Grab the latest release from the
 [Releases page](../../releases/latest):
 
-- **`Comet.cia`** — installs to your HOME Menu with its own icon and
+- **`Comet.cia`** → installs to your HOME Menu with its own icon and
   banner. Needs a CFW with patched signature checks (Luma3DS, which
   you already have if you're using Rosalina screenshots) and an
   installer like [FBI](https://github.com/Steveice10/FBI). Can also be
   installed via QR code through FBI's Remote Install feature.
-- **`Comet.3dsx`** — copy to `sdmc:/3ds/Comet/Comet.3dsx` and launch
+- **`Comet.3dsx`** → copy to `sdmc:/3ds/Comet/Comet.3dsx` and launch
   from the Homebrew Launcher. No install needed.
 
 ## Building from source
@@ -62,7 +58,7 @@ See [BUILDING.md](BUILDING.md) for full toolchain setup and build
 instructions (both `.3dsx` and `.cia`).
 
 ## Credits
-
+- Made with [Claude](https://claude.ai/) by Anthropic 
 - Built with [devkitPro](https://devkitpro.org/)/libctru/citro2d/citro3d
 - Body font: [Poppins](https://fonts.google.com/specimen/Poppins) by
   Indian Type Foundry (SIL Open Font License)

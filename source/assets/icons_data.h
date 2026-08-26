@@ -11,6 +11,11 @@ typedef enum {
     ICON_BTN_R,
     ICON_BTN_L,
     ICON_BTN_SELECT,
+    ICON_BTN_START,
+    ICON_BADGE_DS_TAR,
+    ICON_BADGE_DS_EXTRACTED,
+    ICON_TAB_L,
+    ICON_TAB_R,
     ICON_COUNT,
 } IconId;
 

@@ -8,12 +8,30 @@ typedef struct {
     u32  dataOffset;
     s32  width;
     s32  height;   // always positive
+    u16  bpp;      // 24 (Luma 3DS captures) or 16 (nds-bootstrap DS captures)
     bool topDown;
 } BmpInfo;
+
+// nds-bootstrap writes RGB565; expand a pixel to full 8-bit channels.
+// The low-bit replication (rather than a plain shift) keeps white at
+// exactly 255 instead of 248/252, which a bare shift would produce.
+static inline void rgb565_to_rgb888(u16 v, u8 *r, u8 *g, u8 *b)
+{
+    u8 r5 = (u8)((v >> 11) & 0x1F);
+    u8 g6 = (u8)((v >> 5)  & 0x3F);
+    u8 b5 = (u8)( v        & 0x1F);
+    *r = (u8)((r5 << 3) | (r5 >> 2));
+    *g = (u8)((g6 << 2) | (g6 >> 4));
+    *b = (u8)((b5 << 3) | (b5 >> 2));
+}
 
 // Shared by both bmp_load() and bmp_load_thumbnail(): reads and
 // validates just the file/DIB header, leaving the read position at the
 // start of the header bytes (callers seek to dataOffset themselves).
+// `base` is the byte offset at which this BMP starts within the file
+// -- 0 for a standalone .bmp, or the payload offset of a TAR entry for
+// a DS screenshot read in place. All of the BMP's own offsets are
+// relative to its own start, so they get rebased against this.
 static bool bmp_read_header(FILE *f, BmpInfo *info, char *outErr, size_t outErrSize)
 {
     u8 header[14 + 40];
@@ -37,12 +55,21 @@ static bool bmp_read_header(FILE *f, BmpInfo *info, char *outErr, size_t outErrS
         snprintf(outErr, outErrSize, "Unsupported BMP DIB header (size %lu)", (unsigned long)dibSize);
         return false;
     }
-    if (bpp != 24) {
-        snprintf(outErr, outErrSize, "Unsupported BMP bit depth (%u, expected 24)", bpp);
+    // 24bpp/BI_RGB is what Luma writes for 3DS screenshots; 16bpp
+    // RGB565/BI_BITFIELDS is what nds-bootstrap writes for DS ones.
+    // (The 565 channel masks are assumed rather than parsed -- that's
+    // the only layout nds-bootstrap emits, and a mask mismatch would
+    // show up immediately as visibly wrong colours.)
+    if (bpp != 24 && bpp != 16) {
+        snprintf(outErr, outErrSize, "Unsupported BMP bit depth (%u, expected 24 or 16)", bpp);
         return false;
     }
-    if (compression != 0) {
+    if (bpp == 24 && compression != 0) {
         snprintf(outErr, outErrSize, "Unsupported BMP compression (%lu, expected 0/BI_RGB)", (unsigned long)compression);
+        return false;
+    }
+    if (bpp == 16 && compression != 3 && compression != 0) {
+        snprintf(outErr, outErrSize, "Unsupported 16bpp BMP compression (%lu)", (unsigned long)compression);
         return false;
     }
     if (width <= 0) {
@@ -60,17 +87,28 @@ static bool bmp_read_header(FILE *f, BmpInfo *info, char *outErr, size_t outErrS
     info->dataOffset = dataOffset;
     info->width      = width;
     info->height     = height;
+    info->bpp        = bpp;
     info->topDown    = topDown;
     return true;
 }
 
 bool bmp_load(const char *path, RGBImage *out, char *outErr, size_t outErrSize)
 {
+    return bmp_load_at(path, 0, out, outErr, outErrSize);
+}
+
+bool bmp_load_at(const char *path, long base, RGBImage *out, char *outErr, size_t outErrSize)
+{
     memset(out, 0, sizeof(*out));
 
     FILE *f = fopen(path, "rb");
     if (!f) {
         snprintf(outErr, outErrSize, "Couldn't open %s", path);
+        return false;
+    }
+    if (base != 0 && fseek(f, base, SEEK_SET) != 0) {
+        snprintf(outErr, outErrSize, "Couldn't seek to image data");
+        fclose(f);
         return false;
     }
 
@@ -80,7 +118,8 @@ bool bmp_load(const char *path, RGBImage *out, char *outErr, size_t outErrSize)
         return false;
     }
 
-    u32 srcRowBytes = ((u32)info.width * 3 + 3) & ~3u;
+    u32 bytesPerPx  = (u32)(info.bpp / 8);
+    u32 srcRowBytes = ((u32)info.width * bytesPerPx + 3) & ~3u;
     size_t totalSrcBytes = (size_t)srcRowBytes * (size_t)info.height;
 
     u8 *pixels = (u8 *)malloc((size_t)info.width * info.height * 3);
@@ -103,7 +142,7 @@ bool bmp_load(const char *path, RGBImage *out, char *outErr, size_t outErrSize)
         return false;
     }
 
-    if (fseek(f, (long)info.dataOffset, SEEK_SET) != 0) {
+    if (fseek(f, base + (long)info.dataOffset, SEEK_SET) != 0) {
         snprintf(outErr, outErrSize, "Couldn't seek to pixel data");
         free(pixels);
         free(rawBuf);
@@ -123,13 +162,20 @@ bool bmp_load(const char *path, RGBImage *out, char *outErr, size_t outErrSize)
             s32 dstRow = info.topDown ? row : (info.height - 1 - row);
             u8 *dst = pixels + (size_t)dstRow * info.width * 3;
 
-            for (s32 x = 0; x < info.width; x++) {
-                u8 b = rowSrc[x * 3 + 0];
-                u8 g = rowSrc[x * 3 + 1];
-                u8 r = rowSrc[x * 3 + 2];
-                dst[x * 3 + 0] = r;
-                dst[x * 3 + 1] = g;
-                dst[x * 3 + 2] = b;
+            if (info.bpp == 24) {
+                for (s32 x = 0; x < info.width; x++) {
+                    u8 b = rowSrc[x * 3 + 0];
+                    u8 g = rowSrc[x * 3 + 1];
+                    u8 r = rowSrc[x * 3 + 2];
+                    dst[x * 3 + 0] = r;
+                    dst[x * 3 + 1] = g;
+                    dst[x * 3 + 2] = b;
+                }
+            } else { // 16bpp RGB565
+                for (s32 x = 0; x < info.width; x++) {
+                    u16 v = rd_u16(&rowSrc[x * 2]);
+                    rgb565_to_rgb888(v, &dst[x * 3 + 0], &dst[x * 3 + 1], &dst[x * 3 + 2]);
+                }
             }
         }
     }
@@ -158,9 +204,20 @@ void bmp_free(RGBImage *img)
 bool bmp_load_thumbnail(const char *path, int cols, int rows,
                          u8 *outRGB, char *outErr, size_t outErrSize)
 {
+    return bmp_load_thumbnail_at(path, 0, cols, rows, outRGB, outErr, outErrSize);
+}
+
+bool bmp_load_thumbnail_at(const char *path, long base, int cols, int rows,
+                            u8 *outRGB, char *outErr, size_t outErrSize)
+{
     FILE *f = fopen(path, "rb");
     if (!f) {
         snprintf(outErr, outErrSize, "Couldn't open %s", path);
+        return false;
+    }
+    if (base != 0 && fseek(f, base, SEEK_SET) != 0) {
+        snprintf(outErr, outErrSize, "Couldn't seek to image data");
+        fclose(f);
         return false;
     }
 
@@ -170,7 +227,8 @@ bool bmp_load_thumbnail(const char *path, int cols, int rows,
         return false;
     }
 
-    u32 srcRowBytes = ((u32)info.width * 3 + 3) & ~3u;
+    u32 bytesPerPx  = (u32)(info.bpp / 8);
+    u32 srcRowBytes = ((u32)info.width * bytesPerPx + 3) & ~3u;
     u8 *rowBuf = (u8 *)malloc(srcRowBytes);
     if (!rowBuf) {
         snprintf(outErr, outErrSize, "Out of memory (row buffer)");
@@ -189,7 +247,7 @@ bool bmp_load_thumbnail(const char *path, int cols, int rows,
         int sy = (int)(((long)r * 2 + 1) * info.height / (rows * 2));
         if (sy >= info.height) sy = info.height - 1;
         int fileRow = info.topDown ? sy : (info.height - 1 - sy);
-        long offset = (long)info.dataOffset + (long)fileRow * srcRowBytes;
+        long offset = base + (long)info.dataOffset + (long)fileRow * srcRowBytes;
 
         if (fseek(f, offset, SEEK_SET) != 0 ||
             fread(rowBuf, 1, srcRowBytes, f) != srcRowBytes) {
@@ -206,8 +264,14 @@ bool bmp_load_thumbnail(const char *path, int cols, int rows,
 
             int sumR = 0, sumG = 0, sumB = 0, n = 0;
             for (int sx = sx0; sx < sx1; sx += stepX) {
-                const u8 *px = &rowBuf[sx * 3]; // BMP stores BGR
-                sumB += px[0]; sumG += px[1]; sumR += px[2];
+                if (info.bpp == 24) {
+                    const u8 *px = &rowBuf[sx * 3]; // BMP stores BGR
+                    sumB += px[0]; sumG += px[1]; sumR += px[2];
+                } else {
+                    u8 r, g, b;
+                    rgb565_to_rgb888(rd_u16(&rowBuf[sx * 2]), &r, &g, &b);
+                    sumR += r; sumG += g; sumB += b;
+                }
                 n++;
             }
 

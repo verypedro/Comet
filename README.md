@@ -12,7 +12,8 @@ with the Luma/Rosalina naming theme.
 
 <img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/17582ce9-4958-419d-b5f2-eead40566f2b" />
 <img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/9e87b119-1054-4543-8ef2-6d9b632de473" />
-<img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/e8720f44-a40c-46d2-99e3-4d22ec27e354" />
+<img width="200" height="240" alt="image" src="https://github.com/user-attachments/assets/257262af-13b7-42a5-aab7-7b6916a4f905" />
+
 
 ## Features
 

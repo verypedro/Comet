@@ -66,19 +66,25 @@ instructions (both `.3dsx` and `.cia`).
   [Citra](https://github.com/PabloMK7/citra) emulator's own code,
   since it has to be byte-exact to render real games correctly
 
-See [TECHNICAL.md](TECHNICAL.md) for the deeper build notes — the MPO
+See [TECHNICAL.md](TECHNICAL.md) for the deeper build notes. The MPO
 format internals, the background-threaded texture pipeline, and a
 handful of hardware quirks that took real effort to track down.
 
 ## Troubleshooting
-If your screenshots don't appear in the 3DS Camera after exporting, the management file not being automatically updated.
+
+If your exported screenshots don't appear in the 3DS Camera app, that's
+because the management file isn't automatically refreshed when files
+are added directly to the SD card.
 
 **How to fix:**
-- Open the 3DS camera, navigate to **Settings** and press on **Data Management**.
-- Then, choose **SD Card to System**.
-- You can safely ignore the warning saying _"Videos saved on an SD Card cannot be copied to the System Memory"_. Press **OK**.
-- In the next warning, _"Some photos may not be copied. Is this OK?"_ press **No**
-- If you see a window saying _"The management file will now be updated. This may take some time."_ it worked! You can exit the Settings now.
+- Open the **Camera app** → **Settings**.
+- Choose **Data Management** → **SD Card to System**.
+- You can safely ignore the warning saying *"Videos saved on an SD
+  Card cannot be copied to the System Memory."* Press **OK**.
+- On the next warning, *"Some photos may not be copied. Is this OK?"*
+  press **No**.
+- If you see *"The management file will now be updated. This may take
+  some time,"* it worked — you can exit Settings now.
 - If not, try again.
 
 

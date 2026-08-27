@@ -2,7 +2,7 @@
 
 ![Comet banner](meta/banner.png)
 
-An all-in-one screenshot manager for the 3DS — browse everything in a
+An all-in-one screenshot manager for the 3DS. Browse everything in a
 grid, preview 3DS captures in real stereoscopic 3D, manage DS
 screenshots straight out of nds-bootstrap's tar, filter by type or
 date, and copy or delete individually or in batches.

@@ -70,6 +70,18 @@ See [TECHNICAL.md](TECHNICAL.md) for the deeper build notes — the MPO
 format internals, the background-threaded texture pipeline, and a
 handful of hardware quirks that took real effort to track down.
 
+## Troubleshooting
+If your screenshots don't appear in the 3DS Camera after exporting, the management file not being automatically updated.
+
+**How to fix:**
+- Open the 3DS camera, navigate to **Settings** and press on **Data Management**.
+- Then, choose **SD Card to System**.
+- You can safely ignore the warning saying _"Videos saved on an SD Card cannot be copied to the System Memory"_. Press **OK**.
+- In the next warning, _"Some photos may not be copied. Is this OK?"_ press **No**
+- If you see a window saying _"The management file will now be updated. This may take some time."_ it worked! You can exit the Settings now.
+- If not, try again.
+
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Poppins and `stb_image_write.h` carry

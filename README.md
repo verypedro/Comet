@@ -84,7 +84,7 @@ are added directly to the SD card.
 - On the next warning, *"Some photos may not be copied. Is this OK?"*
   press **No**.
 - If you see *"The management file will now be updated. This may take
-  some time,"* it worked — you can exit Settings now.
+  some time,"* it worked! You can exit Settings now.
 - If not, try again.
 
 

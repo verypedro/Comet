@@ -84,7 +84,7 @@ static void build_exif_app1(const char *exifDateTime19, u8 out[EXIF_APP1_SIZE])
     out[i++] = 0x00; out[i++] = 0x00; out[i++] = 0x00; out[i++] = 0x00; // next IFD
 
     char dt[20] = {0};
-    strncpy(dt, exifDateTime19, 19);
+    memcpy(dt, exifDateTime19, 19); // dt[19] stays the zero-initializer's null terminator
     memcpy(&out[i], dt, 20); i += 20;
 }
 

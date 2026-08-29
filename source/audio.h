@@ -8,6 +8,7 @@ typedef enum {
     SFX_COPY,        // copy-to-album finished
     SFX_DELETE,      // delete finished
     SFX_THUMB_LOAD,  // a grid thumbnail finished loading
+    SFX_EASTER_EGG,  // the secret screen's own jingle
     SFX_COUNT,
 } SfxId;
 

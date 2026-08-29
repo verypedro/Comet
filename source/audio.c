@@ -25,6 +25,7 @@ static const char *const SFX_PATHS[SFX_COUNT] = {
     [SFX_COPY]       = "romfs:/sfx/Copy.wav",
     [SFX_DELETE]     = "romfs:/sfx/Delete.wav",
     [SFX_THUMB_LOAD] = "romfs:/sfx/SmallThumbLoad.wav",
+    [SFX_EASTER_EGG] = "romfs:/sfx/EasterEgg.wav",
 };
 
 static u32 rd32(const u8 *p) { return p[0] | (p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24); }

@@ -3,6 +3,7 @@
 #include "mpo.h"
 #include "fs_utils.h"
 #include "assets/icons_data.h"
+#include "assets/easter_egg_data.h"
 #include "audio.h"
 #include "ds_utils.h"
 #include <stdarg.h>
@@ -52,6 +53,12 @@ typedef enum {
     APP_DS_ONE_DELETE_PROMPT,
     APP_DS_ONE_DELETING,
     APP_QUIT_CONFIRM,
+<<<<<<< Updated upstream
+=======
+    APP_MERGE_CONFIRM,
+    APP_MERGING,
+    APP_EASTER_EGG,
+>>>>>>> Stashed changes
     APP_MODE_SWITCHING,
     // Hidden L+R shortcut from the detail screen -- duplicates the
     // current screenshot, which is mostly a testing convenience.
@@ -110,6 +117,7 @@ static int  item_count(void);
 static void refresh_ds_availability(void);
 static const char *item_timestamp(int idx);
 static bool item_has_3d(int idx);
+static int  detail_menu_item_count(void);
 
 static bool parse_timestamp_ymd(const char *ts, int *outYear, int *outMonth, int *outDay)
 {
@@ -319,6 +327,24 @@ static void rebuild_visible_list(void)
     if (s_selected < 0) s_selected = 0;
 }
 
+// Finds the entry with the given path in the current visible list and
+// moves the cursor there. Shared by every operation that needs to
+// land on a specific item after a rescan reshuffles indices -- matching
+// by path is exact regardless of how qsort happens to order entries
+// that share a timestamp (merge and duplicate both produce one).
+static bool select_item_by_path(const char *path)
+{
+    if (!path) return false;
+    for (int i = 0; i < s_visibleCount; i++) {
+        const char *itemPath = item_top_path(s_visibleIndices[i]);
+        if (itemPath && strcmp(itemPath, path) == 0) {
+            s_selected = i;
+            return true;
+        }
+    }
+    return false;
+}
+
 static ScreenshotPair *current_pair(void)
 {
     if (s_selected < 0 || s_selected >= s_visibleCount) return NULL;
@@ -335,6 +361,14 @@ static int  s_batchIndex = 0;
 static int s_flashFrames = 0;
 
 static bool s_lastSuccess = false;
+
+// Where APP_RESULT's OK button returns to. Defaults to APP_BROWSE
+// (the original, only behavior) -- an operation that wants to stay on
+// the More screen instead (Copy to Album) sets this just before
+// completing to APP_RESULT, and it's reset back to the default the
+// moment it's consumed, so it can never leak into an unrelated later
+// use of the same result screen (e.g. a Merge failure right after).
+static AppState s_resultReturnState = APP_BROWSE;
 static char s_lastMessage[256];
 static char s_lastOutputPath[256];
 
@@ -792,6 +826,15 @@ static int loader_request(const char *pathLeft, const char *pathRight)
     return loader_request_at(pathLeft, 0, pathRight, 0);
 }
 
+// Both the top-screen preview and the bottom-screen capture poll this
+// one shared result slot. A poll must NOT throw away a result just
+// because it isn't its own -- it may belong to the other consumer,
+// which hasn't polled yet this frame. Discarding it there is what
+// left the preview (or the R-held bottom capture) spinning forever
+// waiting for a job that had already completed and been destroyed.
+static int s_previewRequestId = 0;
+static int s_bottomCaptureRequestId = 0;
+
 static bool loader_poll_result(int expectedId, LoaderResult *out)
 {
     bool got = false;
@@ -800,10 +843,16 @@ static bool loader_poll_result(int expectedId, LoaderResult *out)
         if (s_resultId == expectedId) {
             *out = s_result;
             got = true;
+            s_resultValid = false;
+        } else if (s_resultId == s_previewRequestId ||
+                   s_resultId == s_bottomCaptureRequestId) {
+            // Belongs to the other live consumer -- leave it in place
+            // for them rather than freeing it out from under them.
         } else {
+            // Genuinely stale (superseded request): safe to drop.
             free_loader_result(&s_result);
+            s_resultValid = false;
         }
-        s_resultValid = false;
     }
     LightLock_Unlock(&s_loaderLock);
     return got;
@@ -838,14 +887,12 @@ static bool current_preview_ready(void)
     return s_visibleIndices[s_selected] == s_previewLoadedPairIndex;
 }
 static int s_previewRequestedPairIndex = -1;
-static int s_previewRequestId = 0;
 
 // The bottom-screen capture Luma also saves (Rosalina's "_bot.bmp"),
 // shown while holding R in the single-item detail view. Loaded once
 // when entering that view (not continuously, unlike the top-screen
 // live preview), reusing the same loader/texture pipeline.
 static EyeTexture s_bottomCapture;
-static int  s_bottomCaptureRequestId = 0;
 static bool s_bottomCaptureRequested = false;
 
 static void free_eye_texture(EyeTexture *et)
@@ -909,6 +956,40 @@ static void load_static_icons(void)
         C3D_TexSetFilter(&et->tex, GPU_LINEAR, GPU_NEAREST);
         C3D_TexSetWrap(&et->tex, GPU_CLAMP_TO_BORDER, GPU_CLAMP_TO_BORDER);
         et->tex.border = 0x00000000; // transparent, not white -- these are alpha-blended glyphs
+
+        memcpy(et->tex.data, src->data, (size_t)src->texW * src->texH * 4);
+        C3D_TexFlush(&et->tex);
+
+        et->subtex.width  = src->imgW;
+        et->subtex.height = src->imgH;
+        et->subtex.left   = 0.0f;
+        et->subtex.top    = 1.0f;
+        et->subtex.right  = (float)src->imgW / (float)src->texW;
+        et->subtex.bottom = 1.0f - (float)src->imgH / (float)src->texH;
+
+        et->image.tex    = &et->tex;
+        et->image.subtex = &et->subtex;
+        et->valid = true;
+    }
+}
+
+// --- easter egg: two dog photos + a pixel-art avatar, all baked in at
+// compile time (assets/easter_egg_data.c) the same way the icons
+// above are -- never read from the SD card. Loaded once, up front,
+// same as the icons, since three images this size are cheap to keep
+// resident for the app's whole lifetime.
+static EyeTexture s_easterEggTex[EASTER_EGG_IMG_COUNT];
+
+static void load_easter_egg_images(void)
+{
+    for (int i = 0; i < EASTER_EGG_IMG_COUNT; i++) {
+        const EasterEggImage *src = &g_easterEggImages[i];
+        EyeTexture *et = &s_easterEggTex[i];
+
+        if (!C3D_TexInit(&et->tex, src->texW, src->texH, GPU_RGBA8)) continue;
+        C3D_TexSetFilter(&et->tex, GPU_LINEAR, GPU_NEAREST);
+        C3D_TexSetWrap(&et->tex, GPU_CLAMP_TO_BORDER, GPU_CLAMP_TO_BORDER);
+        et->tex.border = 0x00000000; // transparent border, matches the avatar's own transparency
 
         memcpy(et->tex.data, src->data, (size_t)src->texW * src->texH * 4);
         C3D_TexFlush(&et->tex);
@@ -1115,16 +1196,6 @@ static void draw_text(float x, float y, float scale, u32 color, const char *fmt,
     C2D_DrawText(&text, C2D_WithColor, x, y, 0.0f, scale, scale, color);
 }
 
-static void draw_text_right_aligned(float rightEdge, float y, float scale, u32 color, const char *str)
-{
-    C2D_Text t;
-    C2D_TextFontParse(&t, s_fontRegular, s_dynBuf, str);
-    C2D_TextOptimize(&t);
-    float tw, th;
-    C2D_TextGetDimensions(&t, scale, scale, &tw, &th);
-    C2D_DrawText(&t, C2D_WithColor, rightEdge - tw, y, 0.0f, scale, scale, color);
-}
-
 static void draw_centered_text(float x, float y, float w, float h, float scale, u32 color, const char *str)
 {
     C2D_Text t;
@@ -1231,6 +1302,27 @@ static float measure_text(float scale, const char *str)
     float w, h;
     C2D_TextGetDimensions(&t, scale, scale, &w, &h);
     return w;
+}
+
+// Same, but for an explicit font -- the path display needs to measure
+// against SemiBold, which is wider than Regular at the same scale, so
+// measuring with the wrong font would wrap in the wrong place.
+static float measure_text_font(C2D_Font font, float scale, const char *str)
+{
+    C2D_Text t;
+    C2D_TextFontParse(&t, font, s_dynBuf, str);
+    C2D_TextOptimize(&t);
+    float w, h;
+    C2D_TextGetDimensions(&t, scale, scale, &w, &h);
+    return w;
+}
+
+static void draw_text_semibold(float x, float y, float scale, u32 color, const char *str)
+{
+    C2D_Text t;
+    C2D_TextFontParse(&t, s_fontSemiBold, s_dynBuf, str);
+    C2D_TextOptimize(&t);
+    C2D_DrawText(&t, C2D_WithColor, x, y, 0.0f, scale, scale, color);
 }
 
 // Footer hints lay themselves out left-to-right from a fixed left
@@ -1483,6 +1575,7 @@ void ui_init(void)
     COLOR_SEP_POPUP = C2D_Color32(0x8E, 0x8E, 0x8E, 0xff); // inside popups: above and between buttons
 
     load_static_icons();
+    load_easter_egg_images();
     audio_init();
 
     loader_init();
@@ -1619,6 +1712,8 @@ static void enter_detail_view(void)
 // plus lazily-rebuilt thumbnails is a non-issue.
 static void do_delete_current_pair(void)
 {
+    int deletedAt = s_selected; // remember position before the list shrinks
+
     if (s_dsMode) {
         int idx = (s_selected >= 0 && s_selected < s_visibleCount)
                     ? s_visibleIndices[s_selected] : -1;
@@ -1661,7 +1756,31 @@ static void do_delete_current_pair(void)
 
     audio_play(SFX_DELETE);
     s_thumbSfxMute = 45; // let the delete sound breathe
-    op_complete(APP_BROWSE);
+
+    if (s_visibleCount > 0) {
+        // Land on whatever was directly before the deleted item --
+        // clamped to the front if it was already first, and to the
+        // new end in case the list shrank further than expected.
+        s_selected = deletedAt - 1;
+        if (s_selected < 0) s_selected = 0;
+        if (s_selected >= s_visibleCount) s_selected = s_visibleCount - 1;
+
+        // Menu selection may not fit the new item's shape (Merge only
+        // shows when there's a real bottom capture).
+        int newCount = detail_menu_item_count();
+        if (s_detailMenuSelection >= newCount) s_detailMenuSelection = newCount - 1;
+
+        // Same bottom-capture request enter_detail_view() does --
+        // without it, R would peek at the deleted screenshot's now-
+        // stale capture instead of the newly-landed-on one's.
+        if (!s_dsMode) {
+            ScreenshotPair *np = current_pair();
+            if (np) request_bottom_capture(np);
+        }
+        op_complete(APP_DETAIL);
+    } else {
+        op_complete(APP_BROWSE);
+    }
 }
 
 // Reloads whichever library the active mode points at, and resets all
@@ -1812,8 +1931,14 @@ static void do_ds_extract_one(void)
     }
 }
 
+// After extracting one screenshot from the tar -- whether the user
+// then cancels or confirms clearing the tar copy -- land on that
+// file's own More page in the SD Card tab, rather than dropping to
+// the grid.
 static void do_ds_delete_one(void)
 {
+    int deletedAt = s_selected; // remember position before the list shrinks
+
     int idx = current_tar_slot_index();
     if (idx >= 0) {
         // Compacting delete -- repacks survivors into slots 1..N so
@@ -1828,16 +1953,29 @@ static void do_ds_delete_one(void)
     memset(s_thumbs, 0, sizeof(s_thumbs));
     rebuild_visible_list();
     refresh_ds_availability();
+
+    free_preview_textures();
+    s_previewLoadedPairIndex = -1;
+    s_previewRequestedPairIndex = -1;
+
     audio_play(SFX_DELETE);
     s_thumbSfxMute = 45;
 
-    // Emptying this tab entirely means there's nothing left to browse
-    // here -- hand off to SD Card, where the extracted copies live.
-    if (s_dsTarSlotCount == 0 && s_dsCount > 0) {
-        s_dsTab = DS_TAB_SD_CARD;
-        reload_current_mode();
+    if (s_visibleCount > 0) {
+        // Same "land on the previous item, same tab" pattern as the
+        // regular delete flow -- unlike Cancel, there's no "same slot"
+        // to stay on here, since compaction genuinely removed it.
+        s_selected = deletedAt - 1;
+        if (s_selected < 0) s_selected = 0;
+        if (s_selected >= s_visibleCount) s_selected = s_visibleCount - 1;
+
+        int newCount = detail_menu_item_count();
+        if (s_detailMenuSelection >= newCount) s_detailMenuSelection = newCount - 1;
+
+        op_complete(APP_DETAIL);
+    } else {
+        op_complete(APP_BROWSE);
     }
-    op_complete(APP_BROWSE);
 }
 
 static void do_ds_clear(void)
@@ -1898,22 +2036,22 @@ static void do_duplicate(void)
     char stamp[24];
     current_time_stamp(stamp, sizeof(stamp));
     bool ok = false;
+    char newPath[320] = "";
 
     if (s_dsMode) {
         // ".dup" keeps the copy from colliding with a real import made
         // in the same second.
-        char dst[320];
-        snprintf(dst, sizeof(dst), "%s%s/%s_dup%02d.bmp",
+        snprintf(newPath, sizeof(newPath), "%s%s/%s_dup%02d.bmp",
                  SD_ROOT, DS_SCREENSHOTS_DIR, stamp, idx);
-        ok = copy_file_to(s_dsShots[idx].path, dst);
+        ok = copy_file_to(s_dsShots[idx].path, newPath);
         if (ok) ds_rescan_preserving_widescreen();
     } else {
         ScreenshotPair *p = &s_pairs[idx];
         char dst[320];
         // Every file in the set has to share one timestamp, or the
         // scanner won't recognise them as belonging to the same shot.
-        snprintf(dst, sizeof(dst), "%s%s/%s.000_top.bmp", SD_ROOT, SCREENSHOTS_DIR, stamp);
-        ok = copy_file_to(p->topPath, dst);
+        snprintf(newPath, sizeof(newPath), "%s%s/%s.000_top.bmp", SD_ROOT, SCREENSHOTS_DIR, stamp);
+        ok = copy_file_to(p->topPath, newPath);
         if (ok && p->has3D && p->topRightPath[0]) {
             snprintf(dst, sizeof(dst), "%s%s/%s.000_top_right.bmp", SD_ROOT, SCREENSHOTS_DIR, stamp);
             copy_file_to(p->topRightPath, dst);
@@ -1932,6 +2070,12 @@ static void do_duplicate(void)
     free_all_thumbnails();
     memset(s_thumbs, 0, sizeof(s_thumbs));
     rebuild_visible_list();
+
+    // Land on the new duplicate, matching how merge does it -- for
+    // consistency, per explicit request, even though this is really
+    // just a debug convenience.
+    if (ok) select_item_by_path(newPath);
+
     free_preview_textures();
     s_previewLoadedPairIndex = -1;
     s_previewRequestedPairIndex = -1;
@@ -1985,6 +2129,125 @@ static bool item_is_widescreen(int idx)
     return idx < s_dsTarSlotCount && s_dsTarSlots[idx].widescreen;
 }
 
+<<<<<<< Updated upstream
+=======
+// ---- top/bottom merge (3DS only) ----------------------------------
+//
+// Deliberately simple: no stereo 3D, always writes a plain BMP the
+// existing reader already fully understands, and reuses the existing
+// scanner's naming convention rather than adding any special-casing
+// there. "_merged" is inserted before the "_top.bmp" suffix so the
+// output can never collide with the source pair's own filename, while
+// still starting with the source's real timestamp -- since sscanf
+// (used everywhere this gets parsed) only reads the leading date/time
+// and ignores anything after, the merged entry still sorts, filters,
+// and displays by its true original date.
+static void do_merge_top_bottom(void)
+{
+    int idx = (s_selected >= 0 && s_selected < s_visibleCount)
+                ? s_visibleIndices[s_selected] : -1;
+    if (s_dsMode || idx < 0 || idx >= s_pairCount) { s_state = APP_DETAIL; return; }
+
+    ScreenshotPair *p = &s_pairs[idx];
+    char err[128] = {0};
+    RGBImage top, bot;
+    bool haveTop = false, haveBot = false, ok = false;
+    char outPath[320] = "";
+
+    haveTop = bmp_load(p->topPath, &top, err, sizeof(err));
+    if (haveTop && p->botPath[0]) {
+        haveBot = bmp_load(p->botPath, &bot, err, sizeof(err));
+    }
+
+    if (haveTop) {
+        RGBImage merged;
+        merged.width = 400;
+        merged.height = 480;
+        merged.pixels = (u8 *)calloc((size_t)400 * 480 * 3, 1); // black by default
+
+        if (merged.pixels) {
+            // Top half: the top screen is already exactly 400 wide,
+            // straight copy, no scaling.
+            for (int y = 0; y < 240 && y < top.height; y++) {
+                memcpy(&merged.pixels[(size_t)y * 400 * 3],
+                       &top.pixels[(size_t)y * top.width * 3],
+                       (size_t)(top.width < 400 ? top.width : 400) * 3);
+            }
+            // Bottom half: the bottom screen is 320 wide, centred
+            // within the 400-wide canvas -- the 40px margin on each
+            // side stays black from the calloc above.
+            if (haveBot) {
+                int xOff = (400 - bot.width) / 2;
+                if (xOff < 0) xOff = 0;
+                for (int y = 0; y < 240 && y < bot.height; y++) {
+                    memcpy(&merged.pixels[((size_t)(240 + y) * 400 + xOff) * 3],
+                           &bot.pixels[(size_t)y * bot.width * 3],
+                           (size_t)(bot.width < 400 ? bot.width : 400) * 3);
+                }
+            }
+
+            // Write into whatever directory the source screenshot
+            // actually came from -- root for a flat Luma layout, the
+            // same date subfolder for Nexus3DS's optional layout.
+            // Derived from topPath's own directory rather than
+            // hardcoding SCREENSHOTS_DIR, so this needs no special
+            // case for either layout.
+            const char *lastSlash = strrchr(p->topPath, '/');
+            if (lastSlash) {
+                int dirLen = (int)(lastSlash - p->topPath);
+                snprintf(outPath, sizeof(outPath), "%.*s/%s_cmb.bmp",
+                         dirLen, p->topPath, p->timestamp);
+            } else {
+                // topPath is always an absolute path in practice, but
+                // fall back to the known root rather than fail outright.
+                snprintf(outPath, sizeof(outPath), "%s%s/%s_cmb.bmp",
+                         SD_ROOT, SCREENSHOTS_DIR, p->timestamp);
+            }
+            ok = bmp_write(outPath, &merged, err, sizeof(err));
+            free(merged.pixels);
+        } else {
+            snprintf(err, sizeof(err), "Out of memory");
+        }
+    }
+
+    if (haveTop) bmp_free(&top);
+    if (haveBot) bmp_free(&bot);
+
+    if (ok) {
+        int n = fs_scan_screenshot_pairs(s_pairs, MAX_PAIRS);
+        s_pairCount = (n < 0) ? 0 : n;
+        free_all_thumbnails();
+        memset(s_thumbs, 0, sizeof(s_thumbs));
+        rebuild_visible_list();
+
+        // Land on the newly created merged file, not the original --
+        // matching by path rather than a positional guess, since the
+        // merged entry shares the original's exact timestamp and
+        // qsort's tie-breaking between them isn't guaranteed.
+        select_item_by_path(outPath);
+
+        // Force a fresh preview load rather than relying on the
+        // loaded-index check to notice the list changed -- a
+        // coincidental re-sort could in principle leave that check
+        // fooled into thinking the stale preview was still correct.
+        free_preview_textures();
+        s_previewLoadedPairIndex = -1;
+        s_previewRequestedPairIndex = -1;
+
+        s_lastSuccess = true;
+        snprintf(s_lastMessage, sizeof(s_lastMessage), "Screenshot merged");
+        snprintf(s_lastOutputPath, sizeof(s_lastOutputPath), "Added to your gallery");
+        audio_play(SFX_COPY);
+        s_thumbSfxMute = 45;
+    } else {
+        s_lastSuccess = false;
+        snprintf(s_lastMessage, sizeof(s_lastMessage), "Merge failed:");
+        snprintf(s_lastOutputPath, sizeof(s_lastOutputPath), "%s", err[0] ? err : "Unknown error.");
+    }
+    op_complete(APP_RESULT);
+}
+
+>>>>>>> Stashed changes
 static void do_convert(void)
 {
     int idx = (s_selected >= 0 && s_selected < s_visibleCount)
@@ -2051,6 +2314,7 @@ static void do_convert(void)
         snprintf(s_lastMessage, sizeof(s_lastMessage), "Copy failed:");
         snprintf(s_lastOutputPath, sizeof(s_lastOutputPath), "%s", err);
     }
+    s_resultReturnState = APP_DETAIL;
     op_complete(APP_RESULT);
 }
 
@@ -2332,9 +2596,31 @@ static void draw_eye_image(const EyeTexture *et)
     C2D_DrawImageAt(et->image, drawX, drawY, 0.0f, NULL, scaleX, scaleY);
 }
 
+// Deliberately not draw_eye_image: that function's behaviour branches
+// on s_dsMode (widescreen stretch, native-size letterbox for DS
+// content), which doesn't apply here regardless of whether the user
+// triggered this from the 3DS or DS grid. These are always plain
+// 400x240 stereo photos, drawn full-screen like any normal 3D capture.
+static void draw_easter_egg_eye(EyeTexture *et)
+{
+    if (!et->valid) return;
+    C2D_DrawImageAt(et->image, 0, 0, 0.0f, NULL,
+                     400.0f / et->subtex.width, 240.0f / et->subtex.height);
+}
+
 static void draw_top_screen(void)
 {
     switch (s_state) {
+    case APP_EASTER_EGG:
+        // Always stereo -- both eyes are baked in, nothing to load.
+        gfxSet3D(true);
+        C2D_TargetClear(s_top, COLOR_BG);
+        C2D_SceneBegin(s_top);
+        draw_easter_egg_eye(&s_easterEggTex[EASTER_EGG_DOGLEFT]);
+        C2D_TargetClear(s_topRight, COLOR_BG);
+        C2D_SceneBegin(s_topRight);
+        draw_easter_egg_eye(&s_easterEggTex[EASTER_EGG_DOGRIGHT]);
+        return;
     case APP_BATCH_CONVERTING:
     case APP_BATCH_RESULT:
     case APP_BATCH_DELETE_CONFIRM:
@@ -2352,7 +2638,9 @@ static void draw_top_screen(void)
         break;
     }
 
-    if (s_state == APP_BROWSE) {
+    // Also in APP_DETAIL, since Left/Right now moves between
+    // screenshots from that screen and the top screen has to follow.
+    if (s_state == APP_BROWSE || s_state == APP_DETAIL) {
         update_live_preview();
     }
 
@@ -2363,7 +2651,7 @@ static void draw_top_screen(void)
     C2D_SceneBegin(s_top);
     draw_eye_image(&s_previewLeft);
 
-    if (s_state == APP_BROWSE &&
+    if ((s_state == APP_BROWSE || s_state == APP_DETAIL) &&
         s_previewRequestedPairIndex != s_previewLoadedPairIndex) {
         draw_spinner_sized(382, 20, 6, 3.5f);
     }
@@ -2377,6 +2665,43 @@ static void draw_top_screen(void)
 
 #define HEADER_H 27.0f
 
+// Where the L+R mode-toggle hint was last drawn, so it can be tapped.
+// Captured at draw time rather than hardcoded, and cleared on any
+// screen that doesn't show it.
+static float s_modeToggleX = 0.0f, s_modeToggleW = 0.0f;
+
+// Set in ui_frame (where touch coordinates are actually accessible),
+// read in draw_bottom_screen's peekingBottomCapture check.
+static bool s_touchHoldingShowBottom = false;
+
+// Triple-tap-the-header-icon-in-1-second easter egg trigger. A ring
+// buffer of the last 3 tap frame-numbers: if all 3 fall within a
+// 60-frame (1 second at 60fps) window, it fires. Sentinel value keeps
+// the check correctly failing until 3 real taps have actually
+// happened, rather than comparing against stale zeros.
+#define ICON_TAP_WINDOW_FRAMES 60
+static int  s_iconTapFrames[3] = { -100000, -100000, -100000 };
+static int  s_iconTapNext = 0;
+static long s_frameCounter = 0;
+
+// Registers a tap and returns true exactly on the one that completes
+// a triple-tap within the window. Shared by both directions (entering
+// and leaving the easter egg) rather than duplicated, since the
+// detection logic is identical either way.
+static bool register_icon_tap_and_check_triple(void)
+{
+    s_iconTapFrames[s_iconTapNext] = (int)s_frameCounter;
+    s_iconTapNext = (s_iconTapNext + 1) % 3;
+    int oldest = s_iconTapFrames[0];
+    for (int i = 1; i < 3; i++) if (s_iconTapFrames[i] < oldest) oldest = s_iconTapFrames[i];
+    if ((int)s_frameCounter - oldest <= ICON_TAP_WINDOW_FRAMES) {
+        s_iconTapFrames[0] = s_iconTapFrames[1] = s_iconTapFrames[2] = -100000;
+        return true;
+    }
+    return false;
+}
+static bool  s_modeToggleVisible = false;
+
 // Header layout: the screen's own name sits left, the Comet mark is
 // centred, and the right slot carries either a context label or the
 // L+R mode-toggle hint. (The old "[icon] Comet" wordmark is gone --
@@ -2385,6 +2710,7 @@ static void draw_top_screen(void)
 static void draw_header_full(const char *leftLabel, const char *rightLabel,
                               bool showModeToggle, const char *modeLabel)
 {
+    s_modeToggleVisible = false;
     C2D_DrawRectSolid(0, 0, 0, 320, HEADER_H, COLOR_BG);
 
     float iw = icon_width(ICON_COMET);
@@ -2402,6 +2728,13 @@ static void draw_header_full(const char *leftLabel, const char *rightLabel,
         float total = lw + g + plusW + g + rw + 5.0f + labelW;
         float x = 312.0f - total;
         float iconY = (HEADER_H - icon_height(ICON_BTN_L)) / 2.0f;
+
+        // Remember where this landed so a tap on it can toggle modes
+        // too -- derived from the same numbers used to draw, so the
+        // touch target always matches what's actually visible.
+        s_modeToggleX = x - 4.0f;
+        s_modeToggleW = (312.0f - s_modeToggleX) + 4.0f;
+        s_modeToggleVisible = true;
 
         draw_icon(ICON_BTN_L, x, iconY);                       x += lw + g;
         draw_text_vcenter(x, 0, HEADER_H, TEXT_9, COLOR_TEXT, "+"); x += plusW + g;
@@ -2645,13 +2978,33 @@ static float detail_menu_item_y(int i) { return DETAIL_MENU_TOP + i * (DETAIL_ME
 // meaning (Copy / Delete).
 static int detail_menu_item_count(void)
 {
+<<<<<<< Updated upstream
     return (s_dsMode && s_dsTab == DS_TAB_NDS_BOOTSTRAP) ? 3 : 2;
+=======
+    if (s_dsMode) return (s_dsTab == DS_TAB_NDS_BOOTSTRAP) ? 3 : 2;
+    // Merge only makes sense when there's a real bottom capture to
+    // merge with -- this also rules out offering it on an entry
+    // that's already a combined image (a _cmb.bmp-sourced entry has
+    // no separate botPath, same as a shot that just never captured
+    // a bottom frame), which would otherwise double-merge garbage.
+    //
+    // s_previewLoadedPairIndex, not s_selected-derived -- see
+    // draw_detail_menu for why.
+    int idx = s_previewLoadedPairIndex;
+    bool canMerge = idx >= 0 && idx < s_pairCount && s_pairs[idx].botPath[0];
+    return canMerge ? 3 : 2; // Copy / [Merge] / Delete
+>>>>>>> Stashed changes
 }
 
 static void draw_detail_menu(void)
 {
-    int selIdx = (s_selected >= 0 && s_selected < s_visibleCount)
-                    ? s_visibleIndices[s_selected] : -1;
+    // Deliberately s_previewLoadedPairIndex, not s_visibleIndices[s_selected]:
+    // the latter changes the instant Left/Right is pressed, before the
+    // new preview has actually loaded. Using the loaded index means
+    // this panel keeps describing the *previous* screenshot until the
+    // new one's preview genuinely finishes, instead of jumping ahead
+    // of what the top screen is showing.
+    int selIdx = s_previewLoadedPairIndex;
     char dateBuf[32] = "";
     // Tar-tab items have no meaningful per-shot date (item_timestamp
     // returns "" there), so the header's right slot is just left blank
@@ -2677,6 +3030,58 @@ static void draw_detail_menu(void)
         }
         draw_text_vcenter(DETAIL_MENU_X + 10, y, DETAIL_MENU_H, TEXT_12, COLOR_TEXT, labels[i]);
         draw_separator(y + DETAIL_MENU_H);
+    }
+
+    // Source path, bottom-anchored above the footer rule. Worth
+    // showing now that screenshots come from several different places
+    // (Luma's folder, a Nexus3DS date subfolder, inside
+    // screenshots.tar, or Comet's own extracted folder) rather than
+    // always the one location.
+    {
+        char pathBuf[320];
+        if (s_dsMode && s_dsTab == DS_TAB_NDS_BOOTSTRAP) {
+            // Tar entries aren't real files on disk -- show the
+            // archive plus which slot inside it, which is the closest
+            // meaningful "where did this come from".
+            int slot = (selIdx >= 0 && selIdx < s_dsTarSlotCount)
+                         ? s_dsTarSlots[selIdx].slot : 0;
+            snprintf(pathBuf, sizeof(pathBuf), "%s/screenshot%02d.bmp", DS_TAR_PATH, slot);
+        } else {
+            const char *full = item_top_path(selIdx);
+            if (!full) full = "";
+            // Strip the "sdmc:" prefix -- it's the same for everything
+            // and just eats horizontal space.
+            if (strncmp(full, SD_ROOT, strlen(SD_ROOT)) == 0) full += strlen(SD_ROOT);
+            snprintf(pathBuf, sizeof(pathBuf), "%s", full);
+        }
+
+        const float pathLeft = 8.0f, pathRight = 312.0f;
+        const float maxW = pathRight - pathLeft;
+        const float lineH = 11.0f;
+        const float bottomGap = 10.0f; // clear of the footer rule
+
+        if (measure_text_font(s_fontSemiBold, TEXT_9, pathBuf) <= maxW) {
+            draw_text_semibold(pathLeft, FOOTER_Y - bottomGap - lineH, TEXT_9, COLOR_DIM, pathBuf);
+        } else {
+            // Too long for one line: break after the last folder
+            // separator, keeping the '/' on the first line so it still
+            // reads as a path. Nexus3DS's date-subfolder layout plus a
+            // title-ID filename is what actually hits this.
+            char head[320], tail[320];
+            const char *lastSlash = strrchr(pathBuf, '/');
+            if (lastSlash) {
+                int headLen = (int)(lastSlash - pathBuf) + 1; // include the '/'
+                snprintf(head, sizeof(head), "%.*s", headLen, pathBuf);
+                snprintf(tail, sizeof(tail), "%s", lastSlash + 1);
+            } else {
+                snprintf(head, sizeof(head), "%s", pathBuf);
+                tail[0] = '\0';
+            }
+            draw_text_semibold(pathLeft, FOOTER_Y - bottomGap - lineH * 2, TEXT_9, COLOR_DIM, head);
+            if (tail[0]) {
+                draw_text_semibold(pathLeft, FOOTER_Y - bottomGap - lineH, TEXT_9, COLOR_DIM, tail);
+            }
+        }
     }
 }
 
@@ -2913,6 +3318,50 @@ static void draw_day_picker(void)
 }
 
 
+// Deliberately plain: a static thank-you screen, not a data display,
+// so nothing here needs to be mode-aware or touch anything about
+// s_dsMode/s_pairs/etc at all.
+static void draw_easter_egg_screen(void)
+{
+    char dateBuf[32] = "";
+    // The dog photo's own capture date, not "now" -- this screen is
+    // meant to preserve that specific day, not describe the moment
+    // someone happens to find the egg.
+    format_display_date("2026-08-29_14-10-21.136", dateBuf, sizeof(dateBuf));
+    draw_header(NULL, dateBuf);
+
+    typedef struct { const char *text; bool semibold; } EggLine;
+    static const EggLine lines[] = {
+        { "Comet: Observatory of Screenshots", true },
+        { "Concept by Pedro Verri", false },
+        { "", false },
+        { "Thank you so much for using", false },
+        { "my app, I hope you enjoy it!", false },
+        { "", false },
+        { "That's my dog, Pudim.", false },
+        { "She is the best dog ever!", false },
+    };
+    const int lineCount = sizeof(lines) / sizeof(lines[0]);
+    const float textX = 16.0f, textTop = 40.0f, lineH = 18.0f;
+
+    for (int i = 0; i < lineCount; i++) {
+        if (!lines[i].text[0]) continue; // blank line: just leaves the gap
+        float y = textTop + i * lineH;
+        if (lines[i].semibold) draw_text_semibold(textX, y, TEXT_12, COLOR_TEXT, lines[i].text);
+        else                   draw_text(textX, y, TEXT_12, COLOR_TEXT, lines[i].text);
+    }
+
+    // Avatar, vertically centred against the text block, right-aligned
+    // with the same margin the text block's left margin mirrors.
+    EyeTexture *avatar = &s_easterEggTex[EASTER_EGG_AVATAR];
+    if (avatar->valid) {
+        float textBlockH = lineCount * lineH;
+        float ax = 320.0f - 16.0f - avatar->subtex.width - 12.0f;
+        float ay = textTop + (textBlockH - avatar->subtex.height) / 2.0f + 16.0f;
+        C2D_DrawImageAt(avatar->image, ax, ay, 0.0f, NULL, 1.0f, 1.0f);
+    }
+}
+
 static void draw_bottom_screen(void)
 {
     C2D_TargetClear(s_bot, COLOR_BG);
@@ -2925,13 +3374,20 @@ static void draw_bottom_screen(void)
     // an unresolvable spinner on screen if R was held in DS mode --
     // removed rather than kept as a joke, since a spinner with no
     // outcome reads as a hang, not a wink.
-    bool peekingBottomCapture = !s_dsMode && (s_state == APP_DETAIL) && (hidKeysHeld() & KEY_R);
+    bool peekingBottomCapture = !s_dsMode && (s_state == APP_DETAIL) &&
+                                ((hidKeysHeld() & KEY_R) || s_touchHoldingShowBottom);
     if (!peekingBottomCapture) {
         C2D_DrawRectSolid(0, FOOTER_Y, 0, 320, FOOTER_H, COLOR_BG);
         draw_frame_rule(FOOTER_Y);
     }
 
     switch (s_state) {
+    case APP_EASTER_EGG: {
+        draw_easter_egg_screen();
+        const FooterHint eggHints[] = { { ICON_BTN_B, "Back", false } };
+        draw_footer_hints(eggHints, 1);
+        break;
+    }
     case APP_BROWSE:
         draw_grid();
         if (s_batchMode) {
@@ -2976,10 +3432,25 @@ static void draw_bottom_screen(void)
                 };
                 draw_footer_hints(dsDetailHints, 3);
             } else {
-                static const FooterHint detailHints[] = {
-                    { ICON_BTN_A, "OK" }, { ICON_BTN_B, "Back" }, { ICON_BTN_R, "Show Bottom" },
-                };
-                draw_footer_hints(detailHints, 3);
+                // Merged screenshots have no separate bottom capture
+                // (the whole image already contains both screens), so
+                // there's nothing for "Show Bottom" to do -- offering
+                // it there would just be a dead-end option.
+                bool isMerged = s_previewLoadedPairIndex >= 0 &&
+                                s_previewLoadedPairIndex < s_pairCount &&
+                                s_pairs[s_previewLoadedPairIndex].isCombined;
+                if (isMerged) {
+                    const FooterHint detailHints[] = {
+                        { ICON_BTN_A, "OK", false }, { ICON_BTN_B, "Back", false },
+                    };
+                    draw_footer_hints(detailHints, 2);
+                } else {
+                    const FooterHint detailHints[] = {
+                        { ICON_BTN_A, "OK", false }, { ICON_BTN_B, "Back", false },
+                        { ICON_BTN_R, "Show Bottom", false },
+                    };
+                    draw_footer_hints(detailHints, 3);
+                }
             }
         }
         break;
@@ -3129,6 +3600,7 @@ bool ui_frame(void)
     hidScanInput();
     u32 kDown = hidKeysDown();
     s_spinnerAngle += 0.15f;
+    s_frameCounter++;
 
     touchPosition touch;
     hidTouchRead(&touch);
@@ -3168,6 +3640,37 @@ bool ui_frame(void)
 
     AppState stateBefore = s_state;
 
+    // Whether an unconsumed tap is heading into the switch below, to
+    // be handled by state-specific code (a grid cell, a DS tab, a
+    // filter row, etc.) -- as opposed to one already consumed and
+    // sounded by the footer-hit check above. The automatic sound
+    // check further down only recognises A/B/X/Y/L/R/Select
+    // (KEY_TOUCH was never in that set), so without this, every one
+    // of these pure-touch interactions was silently exempt from ever
+    // playing a sound, even though they clearly change state.
+    bool tappedGoingIntoSwitch = tapped;
+
+    // Touch-hold equivalent of physically holding R, specifically for
+    // "Show Bottom" -- the footer-hit consumption above is edge-
+    // triggered (kDown), firing once on the initial tap-down, so a
+    // sustained hold was never actually detected the way
+    // hidKeysHeld() detects a sustained physical R hold. That's why
+    // the tap sound played correctly (it's consumed above) but the
+    // peek itself never engaged. R has exactly one meaning anywhere
+    // in the app (Show Bottom), so matching any KEY_R-mapped hitbox
+    // is unambiguous.
+    s_touchHoldingShowBottom = false;
+    if (hidKeysHeld() & KEY_TOUCH) {
+        for (int i = 0; i < s_footerHitCount; i++) {
+            FooterHitbox *hb = &s_footerHits[i];
+            if (hb->key == KEY_R && !hb->disabled &&
+                point_in_rect(touch.px, touch.py, hb->x, hb->y, hb->w, hb->h)) {
+                s_touchHoldingShowBottom = true;
+                break;
+            }
+        }
+    }
+
     int  batchSelSnapshot = 0;
     for (int i = 0; i < MAX_PAIRS; i++) if (s_batchSelected[i]) batchSelSnapshot += i + 1;
     int  selectedBefore   = s_selected;
@@ -3182,6 +3685,29 @@ bool ui_frame(void)
     DSTab dsTabBefore      = s_dsTab;
 
     switch (s_state) {
+    case APP_EASTER_EGG: {
+        // Triple-tap the icon again also exits, matching how it
+        // entered -- but with the regular button sound instead of the
+        // jingle, so leaving doesn't feel like re-triggering the joke.
+        if (tapped && point_in_rect(touch.px, touch.py, 140, 0, 40, HEADER_H)) {
+            if (register_icon_tap_and_check_triple()) {
+                // Explicit here because this is a touch-only
+                // interaction -- the automatic post-switch sound only
+                // covers A/B/X/Y/L/R/Select, not KEY_TOUCH.
+                audio_play(SFX_BUTTON);
+                s_state = APP_BROWSE;
+            }
+            tapped = false;
+        }
+
+        // B, or a tap on the footer's "Back" hint -- the latter is
+        // already converted into KEY_B by the generic footer-hit
+        // check above (which also already plays SFX_BUTTON for that
+        // path), so this one line covers both.
+        if (kDown & KEY_B) s_state = APP_BROWSE;
+        break;
+    }
+
     case APP_BROWSE:
         if (kDown & KEY_DOWN) {
             int next = s_selected + GRID_COLS;
@@ -3262,7 +3788,30 @@ bool ui_frame(void)
             // exact same frame.
             bool lrCombo = s_dsAvailable && (kDown & (KEY_L | KEY_R)) &&
                            (hidKeysHeld() & KEY_L) && (hidKeysHeld() & KEY_R);
-            if (lrCombo) {
+
+            // Tapping the header hint does the same thing. Hit-tested
+            // against the rect captured while drawing it, so the touch
+            // target always matches what's actually on screen.
+            bool modeTapped = s_dsAvailable && s_modeToggleVisible && tapped &&
+                              point_in_rect(touch.px, touch.py,
+                                            s_modeToggleX, 0, s_modeToggleW, HEADER_H);
+            if (modeTapped) tapped = false; // consumed -- don't also treat it as a grid tap
+
+            // Triple-tap the header icon within 1 second -> easter egg.
+            // The ring buffer naturally self-corrects each tap: since
+            // the check requires ALL 3 stored taps to be within the
+            // window, a stale old tap sitting in the buffer can't
+            // contribute to a false trigger once it ages out, with no
+            // separate "reset" logic needed.
+            if (tapped && point_in_rect(touch.px, touch.py, 140, 0, 40, HEADER_H)) {
+                if (register_icon_tap_and_check_triple()) {
+                    audio_play(SFX_EASTER_EGG);
+                    s_state = APP_EASTER_EGG;
+                }
+                tapped = false;
+            }
+
+            if (lrCombo || modeTapped) {
                 // Deferred by a frame (op_enter/op_tick) so "Loading..."
                 // actually renders before the blocking scan starts --
                 // otherwise it'd only flash up after the wait it exists
@@ -3338,6 +3887,36 @@ bool ui_frame(void)
             if (kDown & KEY_UP)   s_detailMenuSelection = (s_detailMenuSelection + menuCount - 1) % menuCount;
             if (kDown & KEY_B) s_state = APP_BROWSE;
 
+            // Left/Right step through the gallery without leaving this
+            // screen. Clamped rather than wrapping, matching how the
+            // grid itself behaves at its edges.
+            //
+            // Gated on the current preview having actually finished
+            // loading: without it, holding a direction races ahead of
+            // the loader and the bottom screen ends up describing a
+            // different screenshot than the top screen is showing --
+            // the same mismatch that could otherwise lead to deleting
+            // or exporting the wrong file. Same guard used for
+            // entering this screen in the first place.
+            if ((kDown & (KEY_LEFT | KEY_RIGHT)) && current_preview_ready()) {
+                int next = s_selected + ((kDown & KEY_RIGHT) ? 1 : -1);
+                if (next >= 0 && next < s_visibleCount && next != s_selected) {
+                    s_selected = next;
+                    // Menu shape can differ between screenshots (Merge
+                    // only appears when there's a bottom capture), so
+                    // re-clamp rather than leave the cursor past the end.
+                    int newCount = detail_menu_item_count();
+                    if (s_detailMenuSelection >= newCount) s_detailMenuSelection = newCount - 1;
+                    // Same bottom-capture request the detail view does
+                    // on entry -- without this, R would still peek at
+                    // the previously-selected screenshot's bottom frame.
+                    if (!s_dsMode) {
+                        ScreenshotPair *np = current_pair();
+                        if (np) request_bottom_capture(np);
+                    }
+                }
+            }
+
             int chosen = -1;
             if (kDown & KEY_A) chosen = s_detailMenuSelection;
             if (tapped) {
@@ -3407,7 +3986,8 @@ bool ui_frame(void)
         popup_button_rect(0, 1, &bx, &by, &bw, &bh);
         if ((kDown & (KEY_A | KEY_B)) ||
             (tapped && point_in_rect(touch.px, touch.py, bx, by, bw, bh))) {
-            s_state = APP_BROWSE;
+            s_state = s_resultReturnState;
+            s_resultReturnState = APP_BROWSE; // one-shot -- back to the default immediately
         }
         break;
     }
@@ -3498,10 +4078,10 @@ bool ui_frame(void)
         if (pickedDelete) {
             op_enter(APP_DS_ONE_DELETING);
         } else if (pickedCancel) {
-            // Keeping the original: nothing further to do here, but the
-            // grid behind is stale (the SD Card tab gained an entry),
-            // so go back to browsing rather than the detail menu.
-            s_state = APP_BROWSE;
+            // Nothing about the tar changed -- the extracted copy
+            // exists alongside it now, but we're staying right where
+            // we were, same slot, same tab.
+            s_state = APP_DETAIL;
         }
         break;
     }
@@ -3773,7 +4353,7 @@ bool ui_frame(void)
     // batch toggles) without needing an explicit call at every one of
     // the dozens of input branches above -- e.g. this is what makes B
     // silent on the plain Album screen, where it has no Back target.
-    if (nonDirectionalPressed) {
+    if (nonDirectionalPressed || tappedGoingIntoSwitch) {
         int batchSelAfter = 0;
         for (int i = 0; i < MAX_PAIRS; i++) if (s_batchSelected[i]) batchSelAfter += i + 1;
 

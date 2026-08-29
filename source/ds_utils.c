@@ -360,6 +360,7 @@ bool ds_extract_slot(const DSTarSlot *slot, char *outErr, size_t outErrSize)
     }
     free(buf);
 
+
     if (!ok) snprintf(outErr, outErrSize, "Couldn't extract screenshot %d", slot->slot);
     return ok;
 }

@@ -51,6 +51,320 @@ Nintendo's own Switch Album app.
   fallback to the system font, so a missing font never crashes
   anything, it just silently renders differently.
 
+<<<<<<< Updated upstream
+=======
+## Date-subfolder screenshots (Nexus3DS "save in date folders")
+
+`fs_scan_screenshot_pairs` scans the root screenshots directory plus
+one level of subdirectories -- Nexus3DS's optional date-folder layout
+(`luma/screenshots/2026-08-27/`) puts each day's captures in their own
+folder there. Subfolder names aren't validated as looking like a date
+at all; any subdirectory found gets scanned the same way the root
+does, so this doesn't depend on matching one exact naming convention
+and stays correct if a different fork names its folders differently.
+Only one level deep -- there's no legitimate reason for a screenshot
+to be nested further, and bounding the recursion keeps the scan cost
+predictable.
+
+The scanning logic itself (`scan_one_dir`) is unchanged from before,
+just now called once per directory instead of only for the root, and
+each call constructs companion-file paths relative to *its own*
+directory -- so a screenshot's `_top_right`/`_bot` companions are
+always looked for in the same folder the `_top` file was found in,
+never accidentally cross-referenced against the root or a different
+date folder.
+
+Verified end-to-end by compiling the actual scanner against a real
+mixed directory tree (flat root-level Luma files alongside Nexus3DS
+date-subfoldered ones, including the title-ID-embedded naming from
+the fix above, nested inside a subfolder) and confirming every
+screenshot was found, correctly paired, correctly scoped to its own
+folder, and correctly sorted newest-first across all of it -- plus a
+missing screenshots directory, an empty subfolder, and a stray
+non-matching file all handled without incident.
+
+## Crash fixed: dangling pointer in the detail menu labels
+
+Real hardware crash (data abort, reading address 0x13) when opening
+the More screen. Root cause: `detail_menu_item_count()` growing a
+third possible shape (3DS Merge support) had been wired up with the
+label selection rewritten as a real `if (s_dsMode) { ... } else { ... }`
+block, with the `(const char *[]){...}` compound literals created
+*inside* those braces.
+
+That's a genuine, confirmed C bug, not a hypothetical one -- a
+compound literal's storage is scoped to its own *innermost enclosing
+block*, not to the function. Once the if/else block closes, that
+memory is technically invalid, even though `labels` (declared outside
+the block) still holds its address. It can appear to work by pure
+luck of what the compiler does with the freed stack space next --
+which is exactly why this passed earlier testing (a different,
+actually-safe ternary-based pattern was used then) and only broke
+once real code ran between building `labels` and using it.
+
+Reproduced directly before trusting the fix: the exact buggy pattern,
+compiled with optimization, crashes with a segfault and GCC's own
+`-Wdangling-pointer=` warning flags the exact line. Fixed by collapsing
+into a single ternary expression at the point of declaration, so every
+compound literal shares `labels`' own (correct, function-lifetime)
+scope rather than a block that closes before the literal is actually
+read. Re-ran the same reproduction against the fixed pattern -- now in
+a version verified against the *actual* function shape (labels built
+and used within one function, never returned to a caller, matching
+`draw_detail_menu` exactly) -- and confirmed no warning, no crash,
+across all four label-set combinations (3DS mergeable/non-mergeable,
+DS both tabs).
+
+## Nexus3DS filename compatibility, verified for filtering specifically
+
+The buffer-size fix above was verified against the companion-file
+pairing at the time. Separately confirmed the date-filtering path
+specifically: `parse_timestamp_ymd` (the same function used for both
+display and the Year/Month/Day filter) correctly extracts
+2026/08/27 from `2026-08-27_01-59-26.437_000400000FF3AA00` -- `sscanf`
+stops matching once its own format is satisfied, so the trailing
+title ID is simply ignored rather than causing a parse failure.
+
+## Merge Top/Bottom Screens (3DS only)
+
+Deliberately simple, matching how [screenshot-merge](https://github.com/ihaveamac/screenshot-merge)
+solves the same problem: composites the top screen (400x240) and
+bottom screen (320x240, centred with black margins) into one 400x480
+BMP, no stereo 3D. Written straight back into Luma's own screenshots
+folder as `<original_timestamp>_merged_top.bmp` -- inserting "_merged"
+before the suffix means it can never collide with the source pair's
+own filename, while still starting with the real original timestamp,
+so it sorts/filters/displays by the actual capture date rather than
+merge time (the same sscanf-ignores-trailing-text behaviour the
+Nexus3DS fix above depends on).
+
+Output filename is `<original_timestamp>_cmb.bmp` -- the exact
+original base string, whatever it was (title ID included, for a
+Nexus3DS source), no disambiguating suffix needed. That's safe specifically
+because `_cmb.bmp` is a different suffix than `_top.bmp`/
+`_top_right.bmp`/`_bot.bmp`, so it can never collide with the source
+pair's own files even though it starts with the identical timestamp
+string; verified with a real scan where both existed side by side.
+Merge is only offered on an item that actually has a real bottom
+capture (`botPath` set) -- this also rules out merging an
+already-combined entry, since a `_cmb.bmp`-sourced one never has a
+separate `botPath` to begin with.
+
+Written into whatever directory the source screenshot actually came
+from -- the root for a flat Luma layout, the same date subfolder for
+a Nexus3DS one -- derived from `topPath`'s own directory
+(`strrchr(topPath, '/')`) rather than hardcoding the screenshots root.
+No special-casing needed for either layout as a result. Verified with
+both cases directly: a root-level source and a date-subfoldered one
+with a title ID in its name, confirming the output lands in the right
+folder and preserves the full original naming both times.
+
+Needed a new `bmp_write()` -- Comet could only *read* BMP before this.
+Deliberately the simplest valid shape (24bpp, uncompressed,
+BITMAPINFOHEADER), verified with an actual write-then-read-back round
+trip against the real reader before trusting it: built a distinctive
+400x480 test image matching the real merge layout (red top half, blue
+and green quadrants in the centred bottom region, black margins),
+wrote it, read it back, and confirmed every pixel matched exactly,
+including spot-checks of the margin boundaries specifically.
+
+`fs_scan_screenshot_pairs` gained a second scan pass,
+`scan_combined_in_dir()`, specifically for standalone `_cmb.bmp`
+files -- this is also **Nexus3DS's own native format** for its
+"combine top/bottom screenshots" option (400x480, confirmed same
+dimensions as what Comet writes), which the scanner previously never
+looked for *at all* -- not a parsing bug, those files were simply
+invisible to it. Comet's own Merge output and a genuine Nexus3DS
+combined screenshot are now handled by the exact same code path, no
+special-casing between them. No separate companion lookup is
+attempted for these -- the image is self-contained, so they always
+come through as `has3D=false` with an empty `botPath`.
+
+Verified against a real mixed directory: a normal Luma 3D pair, a
+plain `_cmb.bmp`, a title-ID-embedded `_cmb.bmp` (confirming the
+64-byte buffer fix above covers this suffix too, not just `_top.bmp`),
+and a simulated Merge-feature output sharing the exact same timestamp
+as the original pair -- all four discovered correctly, and the
+shared-timestamp pair confirmed genuinely non-colliding (different
+suffix, different file, both intact). Same story on display: the
+existing preview code already does generic aspect-preserving
+letterboxing based on whatever the loaded image's actual dimensions
+are (not a fixed assumption of 400x240), which for a 400x480 image
+already lands at exactly 200x240 centred -- and the grid thumbnail
+path already does an unconditional stretch-to-fill for every
+screenshot regardless of its real aspect ratio. Neither needed any
+merged-image-specific code at all.
+
+## Merged screenshots no longer look stretched in the grid
+
+The distortion wasn't just the final draw-time scale -- it started
+one step earlier. `bmp_load_thumbnail_at` maps the source's full
+width/height directly onto the fixed 48x30 thumbnail buffer with no
+aspect awareness at all, which is barely noticeable for a normal
+~400x240 screenshot (its aspect is already close to the buffer's) but
+very noticeable for a 400x480 merged image. Fixing only the final
+draw call wouldn't have been enough -- the *sampled thumbnail texture
+itself* was already the wrong shape.
+
+Added a `letterbox` parameter: when set, it computes a centred
+sub-region within the 48x30 buffer that preserves the source's true
+aspect ratio, zeroes the whole buffer first, and only samples into
+that sub-region -- everything outside it stays black automatically.
+Wired up via the `isCombined` flag added above, so only merged
+screenshots get this treatment; everything else keeps the exact
+original behaviour.
+
+Verified with a real compiled test rendering the actual pixel buffer
+as ASCII art for three cases: a normal screenshot (fills the buffer
+completely, unchanged), a merged one with letterboxing on (clear black
+margins, content centred, matching the computed math), and the same
+merged source with letterboxing off (fills completely -- directly
+demonstrating the distortion this fixes, not just inferring it existed).
+
+## Merged screenshots get their own grid badge
+
+`ScreenshotPair` gained an explicit `isCombined` flag, set by
+`scan_combined_in_dir()` at the point a `_cmb.bmp` entry is discovered
+(never by the regular `_top.bmp` scan, which zeroes it via the
+existing `memset`). Previously a combined screenshot was
+indistinguishable from an ordinary flat one at the struct level --
+both had `has3D=false` -- so it showed the generic 2D badge. The grid
+now checks `isCombined` before falling back to the 3D/2D check, and
+shows a dedicated badge instead. Verified with a real compiled scan
+against a directory containing both a regular screenshot and a
+`_cmb.bmp` one side by side: the flag came back false and true
+respectively, as expected.
+
+## Deleting a merged screenshot could delete the original's 3D/bottom data
+
+Real, severe bug: a merged (`_cmb.bmp`) entry deliberately shares its
+exact timestamp and directory with the original pair it came from --
+that was the whole point of the "no disambiguator needed" naming
+design a few rounds back, since `_cmb.bmp` is a different suffix and
+can't collide with `_top.bmp`. But the defensive delete fallback added
+later (guessing a companion path from topPath's directory + timestamp
+when the recorded field is empty) didn't know that distinction. A
+combined entry's `topRightPath`/`botPath` are *always* empty by
+design, which the fallback read as "possibly orphaned, worth
+guessing" -- and the path it guessed, `<same dir>/<same
+timestamp>_top_right.bmp`, happens to be exactly the original pair's
+real, still-in-use file. It existed, so it got deleted right along
+with the merged copy.
+
+Fixed by excluding combined entries from the fallback entirely --
+their empty companion fields are permanent, not stale. Verified with
+two real compiled tests: deleting a merged entry that shares a
+timestamp with a real 3D pair now leaves the original's `_top_right`/
+`_bot` untouched, and a genuinely orphaned companion on an ordinary
+(non-combined) pair is still cleaned up as intended.
+
+## After deleting from the More screen, stay there
+
+Deleting used to always drop back to the grid. Now it lands on the
+adjacent (previous) screenshot and stays on the More screen, only
+falling back to the grid when nothing is left to show. Menu selection
+is re-clamped for the new item's shape (Merge only appears with a
+real bottom capture), and the bottom-capture request is redone for
+whatever was landed on -- without that, R would peek at the just-
+deleted screenshot's now-stale capture instead of the new one's.
+
+## More screen info panel lagged behind the loaded preview
+
+Related to the loader fix above, but a separate bug: `draw_detail_menu()`
+and `detail_menu_item_count()` derived which screenshot to describe
+from `s_visibleIndices[s_selected]`, which changes the instant
+Left/Right is pressed -- before the new preview has actually finished
+loading. So the path, date, and menu options (2 vs 3, depending on
+whether the item has a bottom capture) would jump ahead to the newly
+selected screenshot while the top screen was still showing the
+previous one. Left/Right itself was already correctly gated on
+`current_preview_ready()`, but that only stops a *second* press from
+racing ahead -- it didn't stop the info panel from describing the
+target of the first press immediately.
+
+Fixed by driving both from `s_previewLoadedPairIndex` instead --
+which only updates once the async load genuinely completes, not when
+the selection changes. Verified by simulating the exact interleaving:
+old logic describes the new screenshot while the top screen still
+shows the previous one, new logic correctly holds at the previous one
+until the load catches up.
+
+## Loader result contention (preview vs. bottom capture)
+
+The background loader has a single pending-result slot, and
+`loader_poll_result()` used to free any result whose ID didn't match
+what the caller asked for. That was safe while only one thing polled
+it, but enabling live preview updates in `APP_DETAIL` (needed so
+Left/Right navigation updates the top screen) added a second consumer
+alongside the R-held bottom-screen capture. Whichever polled first
+each frame would destroy the other's completed job, leaving that
+consumer waiting on a result that no longer existed: a spinner that
+never resolves.
+
+Symptoms matched exactly: intermittent-but-reproducible-per-screenshot
+(it depends on which job finishes first), affecting both the preview
+and the R-held bottom capture, and **not** affecting DS mode at all --
+`request_bottom_capture()` is only called when `!s_dsMode`, so DS mode
+only ever has one consumer and no contention.
+
+Fixed by having a poll leave results belonging to the *other* live
+consumer in place, and only free genuinely stale ones (an ID matching
+neither outstanding request, i.e. a superseded load). Verified by
+simulating the exact interleaving: old behaviour destroys the
+preview's completed job and spins forever, new behaviour delivers it.
+
+## Merge feature polish: cursor/preview restoration after a merge
+
+After a merge, the new `_cmb.bmp` entry shares the exact same
+timestamp as the source screenshot, so it's easy for the rescan's
+newest-first re-sort to place it right next to (or in place of)
+where the cursor already was. The fix snapshots the *original*
+screenshot's own `topPath` before rescanning (it has to happen before
+-- the in-progress pointer into `s_pairs` gets overwritten in place by
+the rescan, so reading it afterward would read back whatever the
+rescan wrote at that slot, not the original data), then searches the
+freshly rebuilt visible list for that same path and moves the cursor
+there explicitly, rather than trusting a fixed positional offset.
+
+That distinction matters: a simpler "shift the cursor by one position"
+fix was considered and tested against both possible outcomes of C's
+`qsort`, which doesn't guarantee how it breaks ties between equal
+timestamps. The positional shift was only correct in one of the two
+orderings -- it depends on which way qsort happens to place the two
+equal-timestamp entries, which isn't something the code controls.
+Matching by the file's own path is correct regardless of sort order.
+
+Also explicitly resets the preview-loaded tracking state
+(`s_previewLoadedPairIndex`/`s_previewRequestedPairIndex`) and frees
+the current preview textures, rather than relying purely on the
+normal index-mismatch check to notice a refresh is needed -- a
+coincidental re-sort could in principle leave that check fooled.
+
+## Nexus3DS (and other Luma forks) filename compatibility
+
+The 3DS screenshot scanner strips the known suffix (`_top.bmp` etc.)
+from a filename and reuses whatever's left both as the display
+timestamp *and* as the key it constructs companion filenames from.
+That's fine for Luma's own format (23 chars, fits comfortably) but
+Nexus3DS -- an enhanced Luma3DS fork -- embeds a title ID between the
+timestamp and suffix, running to ~40 chars. The old 32-byte
+`ScreenshotPair.timestamp` truncated that mid-title-ID, so the
+constructed `_top_right.bmp`/`_bot.bmp` lookups searched for filenames
+that didn't actually exist on disk -- silently breaking 3D detection
+and the bottom-screen capture for every screenshot from an affected
+fork (`has3D` only ever flips true when the top_right lookup
+succeeds). Fixed by enlarging the buffer to 64 -- title IDs are always
+a fixed 16 hex digits in the 3DS ecosystem, so this isn't a moving
+target. Verified against the exact reported filename, and confirmed
+the old size reproduces the failure.
+
+Downstream consumers (date parsing/display, EXIF embedding) were
+already safe against the longer value -- they all take `const char *`
+and use `sscanf` on just the leading date/time portion, which stops
+matching once its own format string is satisfied regardless of
+trailing text. Only the source field itself needed to grow.
+
+>>>>>>> Stashed changes
 ## DS screenshots (nds-bootstrap)
 
 - nds-bootstrap stores DS captures in a single **uncompressed TAR** at
@@ -240,3 +554,90 @@ covered by the MIT grant:
   from [nothings/stb](https://github.com/nothings/stb). Not included
   in this repo; downloaded fresh from its source at build time per its
   own preferred distribution method (see BUILDING.md).
+
+
+## Hidden easter egg
+
+Triple-tap the header's Comet icon within 1 second, from the plain
+(non-batch) 3DS or DS grid, to reach a static thank-you screen with a
+stereo photo of the developer's dog. Same trigger tapped again from
+inside the screen exits, with the regular button sound instead of the
+jingle.
+
+### Tap timing
+
+Feasibility checked with real numbers before building anything: a
+60-frame (1 second at 60fps) window comfortably fits even a slow,
+400ms-per-tap triple-tap (needs only 48 frames), let alone a
+comfortable one. Detection is a 3-slot ring buffer of tap frame
+numbers -- a tap only counts as the third of a triple if the *oldest*
+of the 3 stored taps is still within the window, which self-corrects
+naturally as stale taps age out without needing separate reset logic.
+Shared between entering and exiting via `register_icon_tap_and_check_triple()`
+rather than duplicated.
+
+Relies on `kDown & KEY_TOUCH` being edge-triggered (fires exactly once
+per physical tap, confirmed from the existing `tapped` variable
+elsewhere in the file) -- level-triggered touch would make counting
+discrete taps unreliable.
+
+### Compile-time embedded images
+
+The two dog photos and the pixel-art avatar are baked into
+`assets/easter_egg_data.c` via a build script
+(`bake_easter_egg.py`) using the exact same Morton/Z-order swizzle
+already verified correct for the icon pipeline -- just applied to
+much larger source images (400x240 stereo pair -> 512x256 textures
+each). Verified with real spot-checks (corners, edges, centre) between
+the baked data and the original source images before trusting it, not
+just "the script ran without error."
+
+Loaded once at startup via `load_easter_egg_images()`, using the exact
+same simple direct-upload pattern as `load_static_icons()` -- no
+runtime file I/O or loader-thread involvement at all, since the data
+is already in the right swizzled format at compile time.
+
+Deliberately not run through `draw_eye_image()` for display -- that
+function's behaviour branches on `s_dsMode` (widescreen stretch,
+native-size letterbox for DS content) which doesn't apply here
+regardless of which grid the user triggered this from. A dedicated
+`draw_easter_egg_eye()` always draws the full 400x240 photo, unscaled.
+
+
+## Button sound missing for pure-touch content interactions
+
+The automatic button-sound check only ever recognised
+`A/B/X/Y/L/R/Select` in its `nonDirectionalPressed` flag -- `KEY_TOUCH`
+was never included. So any interaction that's *purely* a touch tap on
+actual content (opening a screenshot's More page, switching a DS tab,
+tapping a filter row) was invisible to it, even though it clearly
+changes state. Footer hint taps already worked because they get an
+explicit sound of their own at the point they're consumed, which
+masked the gap elsewhere.
+
+Fixed by capturing whether an unconsumed tap is heading into the input
+switch (`tappedGoingIntoSwitch`, captured right after footer-hit
+consumption specifically, so a footer tap's already-played sound
+doesn't also double up here) and including that alongside the
+existing button check. The underlying diff-check is unchanged --
+this only widens what counts as "worth checking," not what counts as
+"actually changed."
+
+## Touch-holding "Show Bottom" didn't work
+
+Physically holding R is detected via `hidKeysHeld()`, queried fresh
+every frame. Touching and holding the "Show Bottom" footer hint has no
+equivalent: footer-hit consumption is edge-triggered (`kDown`), firing
+once on the initial tap-down -- so the tap correctly played its sound
+(that part is consumed there) but never sustained anything afterward,
+which is exactly why the sound played but the peek itself never
+engaged.
+
+Fixed by separately checking, every frame, whether the touchscreen is
+currently held (`hidKeysHeld() & KEY_TOUCH`) over any footer hitbox
+mapped to `KEY_R` -- R has exactly one meaning anywhere in the app
+(confirmed by checking every use of `ICON_BTN_R`), so this can't be
+ambiguous with anything else. Computed in `ui_frame` (where touch
+coordinates are actually in scope) and read from `draw_bottom_screen`
+(a separate function) via a small dedicated flag, set fresh every
+frame before that function runs.

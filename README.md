@@ -33,8 +33,13 @@ with the Luma/Rosalina naming theme.
   with separate tabs for what's still in the tar and what's already
   extracted to SD — view, filter, copy, and delete from either, with
   safe extraction (individually or all at once) and widescreen support
-  for games with a 16:10 patch. See [CHANGELOG.md](CHANGELOG.md) for
-  the details.
+  for games with a 16:10 patch. Also works with
+  [Nexus3DS](https://github.com/2b-zipper/Nexus3DS), a Luma3DS fork
+  with its own screenshot naming and an optional date-folder layout.
+  See [CHANGELOG.md](CHANGELOG.md) for the details.
+- **Merge Top/Bottom Screens**, from any 3DS screenshot's More screen
+  — combines both screens into one image and adds it to your gallery
+  with its own badge. No stereo 3D.
 - A visual style modeled on the Switch's Album app, right down to
   sound effects for key actions
 
@@ -74,7 +79,7 @@ handful of hardware quirks that took real effort to track down.
 ## Troubleshooting
 
 If your exported screenshots don't appear in the 3DS Camera app, that's
-because the management file isn't automatically refreshed when files
+because the management file isn't automatically refreshing when files
 are added directly to the SD card.
 
 **How to fix:**

@@ -97,6 +97,77 @@ bool bmp_load(const char *path, RGBImage *out, char *outErr, size_t outErrSize)
     return bmp_load_at(path, 0, out, outErr, outErrSize);
 }
 
+<<<<<<< Updated upstream
+=======
+// Writes a plain 24bpp uncompressed BMP (BITMAPINFOHEADER, BI_RGB,
+// bottom-up rows) -- deliberately the simplest possible valid BMP,
+// since the only thing that has to read it back is Comet's own
+// reader above, which already handles exactly this shape.
+bool bmp_write(const char *path, const RGBImage *img, char *outErr, size_t outErrSize)
+{
+    u32 rowBytes = ((u32)img->width * 3 + 3) & ~3u; // rows padded to a multiple of 4
+    u32 pixelDataSize = rowBytes * (u32)img->height;
+    u32 fileSize = 14 + 40 + pixelDataSize; // file header + BITMAPINFOHEADER + pixels
+
+    // Build the whole file in memory and write it in ONE fwrite, for
+    // the same reason bmp_load does one big fread: each individual
+    // stdio call carries fixed per-call overhead down through the FS
+    // layer to the SD card, and that overhead dominates when it's
+    // repeated once per row. A 400x480 merge is 480 rows, so the old
+    // row-at-a-time version paid that cost 480 times over for what is
+    // really a single ~576KB linear write.
+    u8 *fileBuf = (u8 *)malloc(fileSize);
+    if (!fileBuf) {
+        snprintf(outErr, outErrSize, "Out of memory building BMP");
+        return false;
+    }
+    memset(fileBuf, 0, fileSize);
+
+    u8 *fileHeader = fileBuf;
+    fileHeader[0] = 'B'; fileHeader[1] = 'M';
+    fileHeader[2] = (u8)(fileSize);
+    fileHeader[3] = (u8)(fileSize >> 8);
+    fileHeader[4] = (u8)(fileSize >> 16);
+    fileHeader[5] = (u8)(fileSize >> 24);
+    fileHeader[10] = 54; // pixel data offset (14 + 40)
+
+    u8 *infoHeader = fileBuf + 14;
+    infoHeader[0] = 40;                                  // header size
+    memcpy(&infoHeader[4],  &img->width,  4);
+    memcpy(&infoHeader[8],  &img->height, 4);            // positive -> bottom-up
+    infoHeader[12] = 1;                                  // planes = 1
+    infoHeader[14] = 24;                                 // bpp = 24
+    memcpy(&infoHeader[20], &pixelDataSize, 4);
+
+    // Rows are stored bottom-to-top (BMP's classic row order) and BGR
+    // per pixel, matching what bmp_load's own reader expects. Padding
+    // bytes are already zero from the memset above.
+    u8 *pixels = fileBuf + 54;
+    for (int y = 0; y < img->height; y++) {
+        const u8 *src = &img->pixels[(size_t)y * img->width * 3];
+        u8 *dst = &pixels[(size_t)(img->height - 1 - y) * rowBytes];
+        for (int x = 0; x < img->width; x++) {
+            dst[x * 3 + 0] = src[x * 3 + 2]; // B
+            dst[x * 3 + 1] = src[x * 3 + 1]; // G
+            dst[x * 3 + 2] = src[x * 3 + 0]; // R
+        }
+    }
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        snprintf(outErr, outErrSize, "Couldn't create %s", path);
+        free(fileBuf);
+        return false;
+    }
+    bool ok = fwrite(fileBuf, 1, fileSize, f) == fileSize;
+    fclose(f);
+    free(fileBuf);
+
+    if (!ok) snprintf(outErr, outErrSize, "Failed writing BMP data to %s", path);
+    return ok;
+}
+
+>>>>>>> Stashed changes
 bool bmp_load_at(const char *path, long base, RGBImage *out, char *outErr, size_t outErrSize)
 {
     memset(out, 0, sizeof(*out));

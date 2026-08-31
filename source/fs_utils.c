@@ -17,105 +17,137 @@ static int pair_cmp_newest_first(const void *a, const void *b)
     return strcmp(pb->timestamp, pa->timestamp);
 }
 
-int fs_scan_screenshot_pairs(ScreenshotPair *out, int max)
+// Scans one directory in a SINGLE pass.
+//
+// The previous version enumerated each directory three times (once for
+// _top.bmp, once for _cmb.bmp, once looking for subfolders) and issued
+// two stat() calls per screenshot to test for its _top_right/_bot
+// companions, plus one stat() per entry just to ask "is this a
+// directory?". For a flat 88-screenshot folder that worked out to
+// roughly 440 filesystem lookups per scan -- and a scan runs on every
+// single delete, which is exactly why deleting had become slow.
+//
+// Now: one enumeration collects every filename into memory, and all
+// the companion questions are answered by string comparison against
+// that list. Zero extra I/O.
+
+#define MAX_DIR_ENTRIES 512
+#define MAX_ENTRY_NAME  128
+
+typedef struct {
+    char (*names)[MAX_ENTRY_NAME];
+    int   count;
+} NameList;
+
+static int name_cmp(const void *a, const void *b)
 {
-    DIR *d = opendir(SD_ROOT SCREENSHOTS_DIR);
-    if (!d) return -1;
-
-    int count = 0;
-    struct dirent *ent;
-    static const char SUFFIX[] = "_top.bmp";
-    const size_t suffixLen = sizeof(SUFFIX) - 1;
-
-    while ((ent = readdir(d)) != NULL && count < max) {
-        size_t nameLen = strlen(ent->d_name);
-        if (nameLen <= suffixLen) continue;
-        if (strcmp(ent->d_name + nameLen - suffixLen, SUFFIX) != 0) continue;
-
-        ScreenshotPair *p = &out[count];
-        memset(p, 0, sizeof(*p));
-
-        size_t tsLen = nameLen - suffixLen;
-        if (tsLen >= sizeof(p->timestamp)) tsLen = sizeof(p->timestamp) - 1;
-        memcpy(p->timestamp, ent->d_name, tsLen);
-        p->timestamp[tsLen] = '\0';
-
-        snprintf(p->topPath, sizeof(p->topPath), "%s%s/%s",
-                 SD_ROOT, SCREENSHOTS_DIR, ent->d_name);
-
-<<<<<<< Updated upstream
-        char rightName[280];
-        snprintf(rightName, sizeof(rightName), "%s%s/%s_top_right.bmp",
-                 SD_ROOT, SCREENSHOTS_DIR, p->timestamp);
-        if (file_exists(rightName)) {
-            snprintf(p->topRightPath, sizeof(p->topRightPath), "%s", rightName);
-=======
-        snprintf(p->topRightPath, sizeof(p->topRightPath), "%s/%s_top_right.bmp", dirPath, p->timestamp);
-        if (file_exists(p->topRightPath)) {
->>>>>>> Stashed changes
-            p->has3D = true;
-        } else {
-            p->topRightPath[0] = '\0';
-        }
-
-<<<<<<< Updated upstream
-        char botName[280];
-        snprintf(botName, sizeof(botName), "%s%s/%s_bot.bmp",
-                 SD_ROOT, SCREENSHOTS_DIR, p->timestamp);
-        if (file_exists(botName)) {
-            snprintf(p->botPath, sizeof(p->botPath), "%s", botName);
-=======
-        snprintf(p->botPath, sizeof(p->botPath), "%s/%s_bot.bmp", dirPath, p->timestamp);
-        if (!file_exists(p->botPath)) {
-            p->botPath[0] = '\0';
->>>>>>> Stashed changes
-        }
-
-        count++;
-    }
-    closedir(d);
-<<<<<<< Updated upstream
-=======
-    return count;
+    return strcmp((const char *)a, (const char *)b);
 }
 
-// Scans one directory for standalone _cmb.bmp files -- Nexus3DS's own
-// "combine top/bottom screenshots" output format (400x480, self-
-// contained), and what Comet's own Merge Top/Bottom Screens feature
-// also writes now, using the same convention. No companion file to
-// look for -- the whole image already stands alone.
-static int scan_combined_in_dir(const char *dirPath, ScreenshotPair *out, int max, int startCount)
+// Both lists are static rather than stack-allocated: at 512 * 128 =
+// 64KB each they'd blow the 3DS's comparatively small stack, and only
+// one scan ever runs at a time.
+static char s_entryNames[MAX_DIR_ENTRIES][MAX_ENTRY_NAME];
+static char s_subDirNames[64][MAX_ENTRY_NAME];
+
+// Reads every entry in one pass, splitting files from subdirectories.
+// Uses dirent's d_type where the filesystem reports it (FAT does),
+// falling back to stat() only for entries it reports as unknown --
+// which is what removes the per-entry stat() call the subfolder scan
+// used to make unconditionally.
+static void enumerate_dir(const char *dirPath, int *outFileCount, int *outDirCount)
 {
+    *outFileCount = 0;
+    *outDirCount  = 0;
+
     DIR *d = opendir(dirPath);
-    if (!d) return startCount;
+    if (!d) return;
 
-    int count = startCount;
     struct dirent *ent;
-    static const char SUFFIX[] = "_cmb.bmp";
-    const size_t suffixLen = sizeof(SUFFIX) - 1;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue; // skip . and ..
+        if (strlen(ent->d_name) >= MAX_ENTRY_NAME) continue;
 
-    while ((ent = readdir(d)) != NULL && count < max) {
-        size_t nameLen = strlen(ent->d_name);
-        if (nameLen <= suffixLen) continue;
-        if (strcmp(ent->d_name + nameLen - suffixLen, SUFFIX) != 0) continue;
+        bool isDir;
+        if (ent->d_type == DT_DIR)       isDir = true;
+        else if (ent->d_type == DT_REG)  isDir = false;
+        else {
+            char full[600];
+            snprintf(full, sizeof(full), "%s/%s", dirPath, ent->d_name);
+            struct stat st;
+            if (stat(full, &st) != 0) continue;
+            isDir = S_ISDIR(st.st_mode);
+        }
+
+        if (isDir) {
+            if (*outDirCount < 64) {
+                snprintf(s_subDirNames[*outDirCount], MAX_ENTRY_NAME, "%s", ent->d_name);
+                (*outDirCount)++;
+            }
+        } else {
+            if (*outFileCount < MAX_DIR_ENTRIES) {
+                snprintf(s_entryNames[*outFileCount], MAX_ENTRY_NAME, "%s", ent->d_name);
+                (*outFileCount)++;
+            }
+        }
+    }
+    closedir(d);
+}
+
+// Sorted list + bsearch, so companion lookups stay fast even with a
+// few hundred files rather than degrading to a linear scan each time.
+static bool name_present(const char *needle, int fileCount)
+{
+    return bsearch(needle, s_entryNames, fileCount, MAX_ENTRY_NAME, name_cmp) != NULL;
+}
+
+// Builds pairs from an already-enumerated, already-sorted name list.
+static int build_pairs_from_names(const char *dirPath, int fileCount,
+                                   ScreenshotPair *out, int max, int startCount)
+{
+    int count = startCount;
+    static const char TOP_SUFFIX[] = "_top.bmp";
+    static const char CMB_SUFFIX[] = "_cmb.bmp";
+    const size_t topLen = sizeof(TOP_SUFFIX) - 1;
+    const size_t cmbLen = sizeof(CMB_SUFFIX) - 1;
+
+    for (int i = 0; i < fileCount && count < max; i++) {
+        const char *name = s_entryNames[i];
+        size_t nameLen = strlen(name);
+
+        bool isTop = nameLen > topLen && strcmp(name + nameLen - topLen, TOP_SUFFIX) == 0;
+        bool isCmb = nameLen > cmbLen && strcmp(name + nameLen - cmbLen, CMB_SUFFIX) == 0;
+        if (!isTop && !isCmb) continue;
 
         ScreenshotPair *p = &out[count];
         memset(p, 0, sizeof(*p));
-        p->isCombined = true;
+        p->isCombined = isCmb;
 
-        size_t tsLen = nameLen - suffixLen;
+        size_t tsLen = nameLen - (isCmb ? cmbLen : topLen);
         if (tsLen >= sizeof(p->timestamp)) tsLen = sizeof(p->timestamp) - 1;
-        memcpy(p->timestamp, ent->d_name, tsLen);
+        memcpy(p->timestamp, name, tsLen);
         p->timestamp[tsLen] = '\0';
 
-        // The combined image stands in as "topPath" -- it's what gets
-        // loaded for both the preview and the thumbnail. No separate
-        // right-eye or bottom capture exists in this format.
-        snprintf(p->topPath, sizeof(p->topPath), "%s/%s", dirPath, ent->d_name);
+        snprintf(p->topPath, sizeof(p->topPath), "%s/%s", dirPath, name);
+
+        // Combined images are self-contained -- no companions to find.
+        if (!isCmb) {
+            char candidate[MAX_ENTRY_NAME];
+
+            snprintf(candidate, sizeof(candidate), "%s_top_right.bmp", p->timestamp);
+            if (name_present(candidate, fileCount)) {
+                snprintf(p->topRightPath, sizeof(p->topRightPath), "%s/%s", dirPath, candidate);
+                p->has3D = true;
+            }
+
+            snprintf(candidate, sizeof(candidate), "%s_bot.bmp", p->timestamp);
+            if (name_present(candidate, fileCount)) {
+                snprintf(p->botPath, sizeof(p->botPath), "%s/%s", dirPath, candidate);
+            }
+        }
 
         count++;
     }
-    closedir(d);
     return count;
 }
 
@@ -124,34 +156,44 @@ int fs_scan_screenshot_pairs(ScreenshotPair *out, int max)
     char rootPath[300];
     snprintf(rootPath, sizeof(rootPath), "%s%s", SD_ROOT, SCREENSHOTS_DIR);
 
-    int count = scan_one_dir(rootPath, out, max, 0);
-    count = scan_combined_in_dir(rootPath, out, max, count);
+    int fileCount = 0, dirCount = 0;
+    enumerate_dir(rootPath, &fileCount, &dirCount);
+
+    // Copy the subdirectory names out before the buffer gets reused by
+    // the per-subfolder enumerations below. Fixed-size copy rather than
+    // snprintf("%s"): GCC can't bound a 2D-array row access through a
+    // %s and assumes the whole array could be read, which is what
+    // produced a spurious truncation warning here.
+    char subDirs[64][MAX_ENTRY_NAME];
+    int subDirCount = dirCount;
+    for (int i = 0; i < subDirCount; i++) {
+        memcpy(subDirs[i], s_subDirNames[i], MAX_ENTRY_NAME);
+        subDirs[i][MAX_ENTRY_NAME - 1] = '\0';
+    }
+
+    qsort(s_entryNames, fileCount, MAX_ENTRY_NAME, name_cmp);
+    int count = build_pairs_from_names(rootPath, fileCount, out, max, 0);
 
     // One level of subdirectories -- Nexus3DS's optional "save
     // screenshots in date folders" setting puts each day's captures
-    // in their own folder directly under the root (e.g.
-    // luma/screenshots/2026-08-27/). Not validated as looking like a
-    // date -- any subfolder found here just also gets scanned, so
-    // this doesn't depend on matching one exact naming scheme, and
-    // stays correct if a different fork names them differently.
-    DIR *d = opendir(rootPath);
-    if (d) {
-        struct dirent *ent;
-        while ((ent = readdir(d)) != NULL && count < max) {
-            if (ent->d_name[0] == '.') continue; // skip . and ..
+    // in their own folder directly under the root. Not validated as
+    // looking like a date: any subfolder found gets scanned, so this
+    // doesn't depend on one exact naming scheme.
+    for (int i = 0; i < subDirCount && count < max; i++) {
+        // Via a plain 1D buffer, for the same GCC-can't-bound-a-2D-row
+        // reason as the copy above.
+        char subName[MAX_ENTRY_NAME];
+        memcpy(subName, subDirs[i], MAX_ENTRY_NAME);
+        subName[MAX_ENTRY_NAME - 1] = '\0';
 
-            char subPath[600];
-            snprintf(subPath, sizeof(subPath), "%s/%s", rootPath, ent->d_name);
+        char subPath[600];
+        snprintf(subPath, sizeof(subPath), "%s/%s", rootPath, subName);
 
-            struct stat st;
-            if (stat(subPath, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-
-            count = scan_one_dir(subPath, out, max, count);
-            count = scan_combined_in_dir(subPath, out, max, count);
-        }
-        closedir(d);
+        int subFileCount = 0, subDirIgnored = 0;
+        enumerate_dir(subPath, &subFileCount, &subDirIgnored); // only one level deep
+        qsort(s_entryNames, subFileCount, MAX_ENTRY_NAME, name_cmp);
+        count = build_pairs_from_names(subPath, subFileCount, out, max, count);
     }
->>>>>>> Stashed changes
 
     qsort(out, count, sizeof(ScreenshotPair), pair_cmp_newest_first);
     return count;

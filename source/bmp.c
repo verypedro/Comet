@@ -97,8 +97,6 @@ bool bmp_load(const char *path, RGBImage *out, char *outErr, size_t outErrSize)
     return bmp_load_at(path, 0, out, outErr, outErrSize);
 }
 
-<<<<<<< Updated upstream
-=======
 // Writes a plain 24bpp uncompressed BMP (BITMAPINFOHEADER, BI_RGB,
 // bottom-up rows) -- deliberately the simplest possible valid BMP,
 // since the only thing that has to read it back is Comet's own
@@ -167,7 +165,6 @@ bool bmp_write(const char *path, const RGBImage *img, char *outErr, size_t outEr
     return ok;
 }
 
->>>>>>> Stashed changes
 bool bmp_load_at(const char *path, long base, RGBImage *out, char *outErr, size_t outErrSize)
 {
     memset(out, 0, sizeof(*out));
@@ -275,11 +272,11 @@ void bmp_free(RGBImage *img)
 bool bmp_load_thumbnail(const char *path, int cols, int rows,
                          u8 *outRGB, char *outErr, size_t outErrSize)
 {
-    return bmp_load_thumbnail_at(path, 0, cols, rows, outRGB, outErr, outErrSize);
+    return bmp_load_thumbnail_at(path, 0, cols, rows, false, outRGB, outErr, outErrSize);
 }
 
 bool bmp_load_thumbnail_at(const char *path, long base, int cols, int rows,
-                            u8 *outRGB, char *outErr, size_t outErrSize)
+                            bool letterbox, u8 *outRGB, char *outErr, size_t outErrSize)
 {
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -298,6 +295,33 @@ bool bmp_load_thumbnail_at(const char *path, long base, int cols, int rows,
         return false;
     }
 
+    // Letterbox mode: rather than mapping the source's full width/
+    // height onto the whole cols x rows buffer (which distorts any
+    // image whose aspect ratio differs from the buffer's -- barely
+    // noticeable for a normal ~400x240 screenshot against a ~48x30
+    // buffer, very noticeable for something shaped like a 400x480
+    // merged screenshot), compute a smaller, centred sub-region that
+    // preserves the source's true aspect ratio, and only sample into
+    // that -- the buffer is pre-zeroed, so everything outside the
+    // sub-region stays black automatically.
+    int dstCols = cols, dstRows = rows, dstX0 = 0, dstY0 = 0;
+    if (letterbox) {
+        memset(outRGB, 0, (size_t)cols * rows * 3);
+        float srcAspect = (float)info.width / (float)info.height;
+        float boxAspect  = (float)cols / (float)rows;
+        if (srcAspect > boxAspect) {
+            dstCols = cols;
+            dstRows = (int)((float)cols / srcAspect + 0.5f);
+            if (dstRows < 1) dstRows = 1;
+        } else {
+            dstRows = rows;
+            dstCols = (int)((float)rows * srcAspect + 0.5f);
+            if (dstCols < 1) dstCols = 1;
+        }
+        dstX0 = (cols - dstCols) / 2;
+        dstY0 = (rows - dstRows) / 2;
+    }
+
     u32 bytesPerPx  = (u32)(info.bpp / 8);
     u32 srcRowBytes = ((u32)info.width * bytesPerPx + 3) & ~3u;
     u8 *rowBuf = (u8 *)malloc(srcRowBytes);
@@ -314,8 +338,8 @@ bool bmp_load_thumbnail_at(const char *path, long base, int cols, int rows,
     // we DO average a few samples horizontally, since that data's
     // already in memory at that point and costs no extra I/O.
     bool ok = true;
-    for (int r = 0; r < rows && ok; r++) {
-        int sy = (int)(((long)r * 2 + 1) * info.height / (rows * 2));
+    for (int r = 0; r < dstRows && ok; r++) {
+        int sy = (int)(((long)r * 2 + 1) * info.height / (dstRows * 2));
         if (sy >= info.height) sy = info.height - 1;
         int fileRow = info.topDown ? sy : (info.height - 1 - sy);
         long offset = base + (long)info.dataOffset + (long)fileRow * srcRowBytes;
@@ -327,9 +351,9 @@ bool bmp_load_thumbnail_at(const char *path, long base, int cols, int rows,
             break;
         }
 
-        for (int c = 0; c < cols; c++) {
-            int sx0 = (c * info.width) / cols;
-            int sx1 = ((c + 1) * info.width) / cols;
+        for (int c = 0; c < dstCols; c++) {
+            int sx0 = (c * info.width) / dstCols;
+            int sx1 = ((c + 1) * info.width) / dstCols;
             if (sx1 <= sx0) sx1 = sx0 + 1;
             int stepX = (sx1 - sx0) > 3 ? (sx1 - sx0) / 3 : 1;
 
@@ -346,7 +370,7 @@ bool bmp_load_thumbnail_at(const char *path, long base, int cols, int rows,
                 n++;
             }
 
-            u8 *dst = &outRGB[(r * cols + c) * 3];
+            u8 *dst = &outRGB[((dstY0 + r) * cols + (dstX0 + c)) * 3];
             dst[0] = (u8)(sumR / n);
             dst[1] = (u8)(sumG / n);
             dst[2] = (u8)(sumB / n);

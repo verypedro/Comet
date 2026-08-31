@@ -102,6 +102,32 @@ int ds_count_tar_screenshots(void)
     return ctx.count;
 }
 
+// Stops at the first occupied slot instead of walking all 50.
+// Callers that only need "is there anything in the tar?" (the boot-time
+// availability check) were paying for a full 50-slot walk -- roughly 50
+// seeks into a 5MB file -- to answer a yes/no question. In the common
+// case where slot 1 is occupied this is now a single seek.
+static bool any_cb(const char *name, long off, long size, void *vctx)
+{
+    (void)name;
+    CountCtx *ctx = (CountCtx *)vctx;
+    if (slot_is_real(ctx->f, off, size)) {
+        ctx->count = 1;
+        return false; // stop the walk
+    }
+    return true;
+}
+
+bool ds_has_any_tar_screenshot(void)
+{
+    FILE *f = fopen(SD_ROOT DS_TAR_PATH, "rb");
+    if (!f) return false;
+    CountCtx ctx = { f, 0 };
+    tar_walk(f, any_cb, &ctx);
+    fclose(f);
+    return ctx.count > 0;
+}
+
 // ---- extraction ---------------------------------------------------
 
 typedef struct {
@@ -285,6 +311,24 @@ int ds_count_extracted(void)
     }
     closedir(dir);
     return count;
+}
+
+// Same idea as ds_has_any_tar_screenshot: stops at the first match
+// rather than enumerating the whole folder to answer a yes/no.
+bool ds_has_any_extracted(void)
+{
+    DIR *dir = opendir(SD_ROOT DS_SCREENSHOTS_DIR);
+    if (!dir) return false;
+
+    bool found = false;
+    struct dirent *ent;
+    while (!found && (ent = readdir(dir)) != NULL) {
+        const char *nm = ent->d_name;
+        size_t len = strlen(nm);
+        if (len >= 5 && strcasecmp(nm + len - 4, ".bmp") == 0) found = true;
+    }
+    closedir(dir);
+    return found;
 }
 
 bool ds_delete(const DSScreenshot *s)

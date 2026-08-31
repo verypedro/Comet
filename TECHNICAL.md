@@ -51,8 +51,6 @@ Nintendo's own Switch Album app.
   fallback to the system font, so a missing font never crashes
   anything, it just silently renders differently.
 
-<<<<<<< Updated upstream
-=======
 ## Date-subfolder screenshots (Nexus3DS "save in date folders")
 
 `fs_scan_screenshot_pairs` scans the root screenshots directory plus
@@ -364,7 +362,6 @@ and use `sscanf` on just the leading date/time portion, which stops
 matching once its own format string is satisfied regardless of
 trailing text. Only the source field itself needed to grow.
 
->>>>>>> Stashed changes
 ## DS screenshots (nds-bootstrap)
 
 - nds-bootstrap stores DS captures in a single **uncompressed TAR** at
@@ -496,6 +493,17 @@ Batch delete therefore walks the selection **highest index first** --
 forward order would delete the wrong slots after the first one.
 (Verified by simulation: deleting indices 1 and 3 of A,B,C,D,E
 forwards removes B and E instead of B and D.)
+
+### Whole-pixel rounded rects
+
+`draw_rounded_rect` snaps its coordinates to whole pixels before
+drawing, for the same reason icons do (below). DS mode's grid is
+centred via a half-pixel origin (`GRID_LEFT_DS = 19.5`), and at the
+2px radius used everywhere, a fractional circle centre rasterizes
+asymmetrically -- one corner reads rounded, the opposite one sharp.
+3DS mode's whole-pixel grid never exposed this. Confirmed the snap is
+a no-op for every other caller (detail menu, filter rows, popups),
+which all already use whole-pixel coordinates.
 
 ### Whole-pixel icon placement
 
@@ -641,3 +649,162 @@ ambiguous with anything else. Computed in `ui_frame` (where touch
 coordinates are actually in scope) and read from `draw_bottom_screen`
 (a separate function) via a small dedicated flag, set fresh every
 frame before that function runs.
+
+
+## Performance: scanning, deleting, and boot
+
+Deleting a 3DS screenshot had become noticeably slow on a large
+library. Profiling the actual filesystem calls (rather than guessing)
+found the cost was in the directory scan that runs after every delete,
+not in the delete itself:
+
+- `scan_one_dir` and `scan_combined_in_dir` each opened and enumerated
+  the *same* directory separately, and the subfolder loop enumerated
+  it a third time
+- Two `stat()` calls per screenshot to test for `_top_right`/`_bot`
+- One more `stat()` per directory entry, purely to ask "is this a
+  directory?"
+
+For a flat 88-screenshot library (264 files) that worked out to about
+**440 stat() calls and 3 full enumerations, on every delete**.
+
+Rewritten to enumerate once into an in-memory, sorted name list, then
+answer every companion question with `bsearch` against that list --
+zero additional I/O. Subdirectories are identified from `dirent`'s
+`d_type` where the filesystem reports it (FAT does), falling back to
+`stat()` only for entries reported as unknown. Same library now costs
+1 enumeration and 0 stat() calls. This speeds up boot and every grid
+refresh too, since they all go through the same scan.
+
+### Thumbnails survive a delete
+
+Deleting used to `free_all_thumbnails()` and rebuild every thumbnail
+from scratch -- each one being a file open plus ~30 seek/read pairs.
+But deleting one screenshot leaves every *other* thumbnail perfectly
+valid; only its index shifts. `remove_thumbnail_at()` now drops just
+the deleted entry and shifts the rest down.
+
+The catch: `EyeTexture` contains self-references (`image.tex` points
+at its own `.tex` field), so a plain `memmove` leaves every shifted
+entry's image pointing at the previous slot's texture -- the exact
+hazard that made in-place shifting off-limits before. They're repaired
+explicitly right after the move, which is what makes it safe. Verified
+by simulation that the shifted thumbnail array stays aligned with the
+rescanned pair list, including when deleting the first and last items.
+
+### Boot-time DS availability
+
+`refresh_ds_availability()` only ever compares its result against
+zero, but was calling `ds_count_tar_screenshots()`, which walks all 50
+tar slots (~50 seeks into a 5MB file), plus a full enumeration of the
+extracted folder. Added `ds_has_any_tar_screenshot()` /
+`ds_has_any_extracted()`, which stop at the first hit -- in the common
+case where slot 1 is occupied, a single seek instead of fifty.
+
+
+## Bottom-screen capture is loaded lazily
+
+The remaining "deleting a 3DS screenshot feels slow" complaint, after
+the scanner work above, traced to something else entirely -- and the
+giveaway was that DS mode deletes stayed fast throughout.
+
+`request_bottom_capture()` was called eagerly on every navigation:
+entering the More screen, moving with Left/Right, and after a delete.
+Each call queues a full ~230KB BMP decode plus Morton swizzle, whether
+or not the user ever actually presses R. Two things made that
+expensive:
+
+- It's pure speculative work. Most navigations never peek at the
+  bottom screen at all.
+- The loader has a **single** pending-result slot, so that speculative
+  job competes with the top-screen preview -- and the More screen
+  waits on the preview before it shows anything. So the user waits on
+  a decode they never asked for.
+
+DS mode never had either problem, because DS captures have no
+companion bottom frame and `request_bottom_capture` is skipped
+entirely there. That asymmetry is exactly what made 3DS deletes feel
+slow next to DS ones despite sharing the same code path.
+
+Now `invalidate_bottom_capture()` just drops the stale texture (cheap,
+no I/O), and `maybe_request_bottom_capture()` performs the actual load
+on the first frame the peek is genuinely engaged -- covering both
+physical R and the touch-hold path. A `s_bottomCapturePairIndex`
+tracker means releasing and re-pressing R on the same screenshot
+doesn't reload anything.
+
+Post-delete loader work drops from ~806KB to ~576KB (29%), and more
+importantly the preview no longer queues behind a job nobody asked
+for. The same saving applies to every Left/Right navigation and every
+entry into the More screen.
+
+
+## Startup time: easter egg assets moved to romfs
+
+The easter egg's two dog photos and avatar were baked into
+`assets/easter_egg_data.c` as C arrays -- about **1.06MB living in
+.rodata**, which the 3DS loads into memory at *every* launch, plus
+three texture uploads in `ui_init()` before the app was usable. All
+for a screen most people will never open.
+
+They're now pre-swizzled into plain binary files under `romfs/egg/`
+(8-byte header of texW/texH/imgW/imgH, then the swizzled RGBA
+payload), and loaded on first trigger instead of at startup. romfs is
+read on demand rather than loaded wholesale at launch, so this removes
+the 1.06MB from both the startup read *and* the resident memory
+footprint until the egg is actually opened.
+
+Because the payload is swizzled at build time, loading is still just a
+header read plus one straight read into texture memory -- no
+per-pixel work at runtime, same as when it was a C array.
+
+Verified the on-disk format round-trips: read the header and payload
+exactly as the C loader does, then spot-checked pixels (corners,
+edges, centre) against the original images.
+
+
+## Startup time: sounds load on first play
+
+`audio_init()` loaded all six WAVs up front -- about **640KB read off
+the card before the app could show anything**, and over a third of
+that (252KB) was the easter egg jingle most people will never trigger.
+
+Now `audio_init()` only initialises ndsp; each sound is loaded and
+configured by `ensure_sfx_loaded()` the first time it's actually
+played. An `attempted` flag means a failed load isn't retried on
+every play. Individual files are small enough that the one-off hitch
+is imperceptible, and the two largest (Copy at 215KB, Delete at 84KB)
+only ever play during operations that already hold a progress popup
+on screen.
+
+### What's left, and why
+
+Startup romfs reads across this session:
+
+| | before | after |
+|---|---|---|
+| fonts | 1,053,264 | 1,053,264 |
+| sound effects | 640,728 | 0 |
+| easter egg assets | 1,114,136 | 0 |
+| **total** | **2.68 MB** | **1.00 MB** |
+
+The two Poppins `.bcfnt` files (526KB each) are the remaining eager
+load and are deliberately left alone: both are needed to draw the very
+first frame (Regular for body text, SemiBold for the header title), so
+deferring them would just move the cost somewhere more visible. The
+real lever there would be regenerating them with a restricted
+character set via `mkbcfnt`, which would cut them substantially -- but
+that changes the build inputs rather than the code, so it's a
+deliberate call for the project owner rather than something to do
+silently.
+
+
+## Merge no longer shows a confirmation popup on success
+
+Since merging already lands on the grid with the new merged
+screenshot's thumbnail highlighted, the "Screenshot merged / Added to
+your gallery / OK" popup afterward was pure friction -- the result was
+already visible without it. Removed for the success path only;
+failure still shows `APP_RESULT` with an error message, since a failed
+merge has nothing visible in the grid to explain what happened the way
+a new thumbnail does for success.

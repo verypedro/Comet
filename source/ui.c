@@ -3,7 +3,6 @@
 #include "mpo.h"
 #include "fs_utils.h"
 #include "assets/icons_data.h"
-#include "assets/easter_egg_data.h"
 #include "audio.h"
 #include "ds_utils.h"
 #include <stdarg.h>
@@ -53,12 +52,9 @@ typedef enum {
     APP_DS_ONE_DELETE_PROMPT,
     APP_DS_ONE_DELETING,
     APP_QUIT_CONFIRM,
-<<<<<<< Updated upstream
-=======
     APP_MERGE_CONFIRM,
     APP_MERGING,
     APP_EASTER_EGG,
->>>>>>> Stashed changes
     APP_MODE_SWITCHING,
     // Hidden L+R shortcut from the detail screen -- duplicates the
     // current screenshot, which is mostly a testing convenience.
@@ -507,7 +503,11 @@ static void ds_rescan_preserving_widescreen(void)
         s_dsWidescreenPathCount = 0;
         for (int i = 0; i < s_dsCount && s_dsWidescreenPathCount < MAX_DS_SHOTS; i++) {
             if (s_dsShots[i].widescreen) {
-                snprintf(s_dsWidescreenPaths[s_dsWidescreenPathCount], 256, "%s", s_dsShots[i].path);
+                // Fixed-size copy: both are char[256], and GCC can't
+                // bound a struct-array member through %s (it assumes
+                // the whole array), producing a spurious warning.
+                memcpy(s_dsWidescreenPaths[s_dsWidescreenPathCount], s_dsShots[i].path, 256);
+                s_dsWidescreenPaths[s_dsWidescreenPathCount][255] = '\0';
                 s_dsWidescreenPathCount++;
             }
         }
@@ -567,6 +567,8 @@ static bool state_has_popup(AppState st)
     case APP_DS_ONE_DELETING:
     case APP_QUIT_CONFIRM:
     case APP_MODE_SWITCHING:
+    case APP_MERGE_CONFIRM:
+    case APP_MERGING:
     case APP_DUPLICATE_CONFIRM:
     case APP_DUPLICATING:
         return true;
@@ -973,33 +975,69 @@ static void load_static_icons(void)
     }
 }
 
-// --- easter egg: two dog photos + a pixel-art avatar, all baked in at
-// compile time (assets/easter_egg_data.c) the same way the icons
-// above are -- never read from the SD card. Loaded once, up front,
-// same as the icons, since three images this size are cheap to keep
-// resident for the app's whole lifetime.
+// --- easter egg: two dog photos + a pixel-art avatar, shipped inside
+// the app itself (romfs/egg/) rather than read from the user's SD
+// card. Pre-swizzled at build time by bake_easter_egg.py.
+typedef enum {
+    EASTER_EGG_DOGLEFT,
+    EASTER_EGG_DOGRIGHT,
+    EASTER_EGG_AVATAR,
+    EASTER_EGG_IMG_COUNT,
+} EasterEggImageId;
+
 static EyeTexture s_easterEggTex[EASTER_EGG_IMG_COUNT];
+
+// Loaded from romfs on first use rather than baked into the
+// executable. As a C array in .rodata this was ~1.06MB the 3DS had to
+// load into memory at *every* launch, plus three texture uploads
+// before the app was even usable -- all for a screen most people will
+// never open. In romfs it's read on demand instead, so it costs
+// nothing until the easter egg is actually triggered.
+//
+// The files are pre-swizzled at build time (see bake_easter_egg.py),
+// so loading is just a header read plus one straight read into
+// texture memory -- no per-pixel work at runtime.
+static bool s_easterEggLoaded = false;
+
+static const char *const kEasterEggFiles[EASTER_EGG_IMG_COUNT] = {
+    [EASTER_EGG_DOGLEFT]  = "romfs:/egg/dog_left.bin",
+    [EASTER_EGG_DOGRIGHT] = "romfs:/egg/dog_right.bin",
+    [EASTER_EGG_AVATAR]   = "romfs:/egg/avatar.bin",
+};
 
 static void load_easter_egg_images(void)
 {
+    if (s_easterEggLoaded) return;
+    s_easterEggLoaded = true; // set regardless, so a failed load isn't retried every frame
+
     for (int i = 0; i < EASTER_EGG_IMG_COUNT; i++) {
-        const EasterEggImage *src = &g_easterEggImages[i];
         EyeTexture *et = &s_easterEggTex[i];
 
-        if (!C3D_TexInit(&et->tex, src->texW, src->texH, GPU_RGBA8)) continue;
+        FILE *f = fopen(kEasterEggFiles[i], "rb");
+        if (!f) continue;
+
+        u16 hdr[4]; // texW, texH, imgW, imgH
+        if (fread(hdr, sizeof(u16), 4, f) != 4) { fclose(f); continue; }
+        u16 texW = hdr[0], texH = hdr[1], imgW = hdr[2], imgH = hdr[3];
+
+        if (!C3D_TexInit(&et->tex, texW, texH, GPU_RGBA8)) { fclose(f); continue; }
         C3D_TexSetFilter(&et->tex, GPU_LINEAR, GPU_NEAREST);
         C3D_TexSetWrap(&et->tex, GPU_CLAMP_TO_BORDER, GPU_CLAMP_TO_BORDER);
         et->tex.border = 0x00000000; // transparent border, matches the avatar's own transparency
 
-        memcpy(et->tex.data, src->data, (size_t)src->texW * src->texH * 4);
+        size_t bytes = (size_t)texW * texH * 4;
+        bool ok = fread(et->tex.data, 1, bytes, f) == bytes;
+        fclose(f);
+        if (!ok) { C3D_TexDelete(&et->tex); continue; }
+
         C3D_TexFlush(&et->tex);
 
-        et->subtex.width  = src->imgW;
-        et->subtex.height = src->imgH;
+        et->subtex.width  = imgW;
+        et->subtex.height = imgH;
         et->subtex.left   = 0.0f;
         et->subtex.top    = 1.0f;
-        et->subtex.right  = (float)src->imgW / (float)src->texW;
-        et->subtex.bottom = 1.0f - (float)src->imgH / (float)src->texH;
+        et->subtex.right  = (float)imgW / (float)texW;
+        et->subtex.bottom = 1.0f - (float)imgH / (float)texH;
 
         et->image.tex    = &et->tex;
         et->image.subtex = &et->subtex;
@@ -1058,13 +1096,13 @@ typedef struct {
 
 static Thumbnail s_thumbs[MAX_PAIRS];
 
-static void build_thumbnail(const char *bmpPath, long base, Thumbnail *out)
+static void build_thumbnail(const char *bmpPath, long base, bool letterbox, Thumbnail *out)
 {
     out->attempted = true;
 
     u8 rgb[THUMB_COLS * THUMB_ROWS * 3];
     char err[64];
-    if (!bmp_load_thumbnail_at(bmpPath, base, THUMB_COLS, THUMB_ROWS, rgb, err, sizeof(err))) {
+    if (!bmp_load_thumbnail_at(bmpPath, base, THUMB_COLS, THUMB_ROWS, letterbox, rgb, err, sizeof(err))) {
         free_eye_texture(&out->tex);
         return;
     }
@@ -1106,6 +1144,39 @@ static void free_all_thumbnails(void)
     for (int i = 0; i < MAX_PAIRS; i++) free_eye_texture(&s_thumbs[i].tex);
 }
 
+// Drops one thumbnail and shifts the rest down, instead of throwing
+// away every thumbnail and re-reading them all off the SD card.
+// Deleting one screenshot removes exactly one entry from an otherwise
+// identically-ordered list, so every surviving thumbnail is still
+// valid -- only its index moves.
+//
+// EyeTexture contains self-references (image.tex points at its own
+// .tex field), so a plain memmove would leave every shifted entry's
+// image pointing at the *previous* slot's texture. They're repaired
+// explicitly right after the move, which is what makes shifting these
+// structs safe here.
+static void remove_thumbnail_at(int idx)
+{
+    if (idx < 0 || idx >= MAX_PAIRS) return;
+
+    free_eye_texture(&s_thumbs[idx].tex);
+
+    if (idx < MAX_PAIRS - 1) {
+        memmove(&s_thumbs[idx], &s_thumbs[idx + 1],
+                (size_t)(MAX_PAIRS - 1 - idx) * sizeof(Thumbnail));
+    }
+    memset(&s_thumbs[MAX_PAIRS - 1], 0, sizeof(Thumbnail));
+
+    // Repair the self-references broken by the move.
+    for (int i = idx; i < MAX_PAIRS; i++) {
+        EyeTexture *et = &s_thumbs[i].tex;
+        if (et->valid) {
+            et->image.tex    = &et->tex;
+            et->image.subtex = &et->subtex;
+        }
+    }
+}
+
 // Called every frame while browsing: kicks off a background load when
 // the selection changes (both eyes, if the pair is 3D-capable), and
 // applies the result once ready.
@@ -1136,6 +1207,11 @@ static void update_live_preview(void)
 // Kicks off a background load of the bottom-screen capture for the
 // given pair (if it has one) -- called once when entering the detail
 // view, not continuously.
+// Which pair index s_bottomCapture currently holds (or -1). Lets the
+// lazy request below skip re-loading when the peek is released and
+// pressed again on the same screenshot.
+static int s_bottomCapturePairIndex = -1;
+
 static void request_bottom_capture(const ScreenshotPair *p)
 {
     free_eye_texture(&s_bottomCapture);
@@ -1143,6 +1219,40 @@ static void request_bottom_capture(const ScreenshotPair *p)
     if (p && p->botPath[0]) {
         s_bottomCaptureRequestId = loader_request(p->botPath, NULL);
         s_bottomCaptureRequested = true;
+    }
+}
+
+// Invalidates the cached bottom capture without loading anything.
+// Called when the selection changes -- the actual load is deferred
+// until the peek is genuinely requested (see maybe_request_bottom_capture).
+//
+// This used to eagerly queue the load on every navigation, which put a
+// full ~230KB decode+swizzle into the loader whether or not the user
+// ever pressed R. Worse, the loader has a single result slot, so that
+// speculative job competed with the top-screen preview -- and the More
+// screen waits on the preview before showing anything. That made every
+// 3DS navigation and delete feel far slower than the DS equivalents,
+// which have no bottom capture at all.
+static void invalidate_bottom_capture(void)
+{
+    free_eye_texture(&s_bottomCapture);
+    s_bottomCaptureRequested = false;
+    s_bottomCapturePairIndex = -1;
+}
+
+// Loads the bottom capture for the current pair, if it isn't already
+// loaded or in flight. Called only when the peek is actually engaged.
+static void maybe_request_bottom_capture(void)
+{
+    if (s_dsMode) return; // DS captures have no companion bottom frame
+    if (s_selected < 0 || s_selected >= s_visibleCount) return;
+
+    int idx = s_visibleIndices[s_selected];
+    if (idx == s_bottomCapturePairIndex) return; // already loaded or loading
+
+    if (idx >= 0 && idx < s_pairCount) {
+        request_bottom_capture(&s_pairs[idx]);
+        s_bottomCapturePairIndex = idx;
     }
 }
 
@@ -1213,6 +1323,16 @@ static void draw_centered_text(float x, float y, float w, float h, float scale, 
 // circles of that same radius. No gaps, no overlap artifacts.
 static void draw_rounded_rect(float x, float y, float w, float h, float radius, u32 color)
 {
+    // Whole-pixel snapping -- DS mode's grid is horizontally centred
+    // via a half-pixel origin (GRID_LEFT_DS = 19.5), and at a radius
+    // this small (2px), a fractional centre makes the corner circles
+    // rasterize asymmetrically -- one side reads rounded, the other
+    // sharp. Same root cause as the earlier footer-icon artifact fix.
+    x = floorf(x + 0.5f);
+    y = floorf(y + 0.5f);
+    w = floorf(w + 0.5f);
+    h = floorf(h + 0.5f);
+
     if (radius <= 0.0f || radius * 2 > w || radius * 2 > h) {
         C2D_DrawRectSolid(x, y, 0, w, h, color);
         return;
@@ -1575,7 +1695,6 @@ void ui_init(void)
     COLOR_SEP_POPUP = C2D_Color32(0x8E, 0x8E, 0x8E, 0xff); // inside popups: above and between buttons
 
     load_static_icons();
-    load_easter_egg_images();
     audio_init();
 
     loader_init();
@@ -1695,11 +1814,8 @@ static void enter_detail_view(void)
 {
     if (s_selected < 0 || s_selected >= s_visibleCount) return;
     s_detailMenuSelection = 0; // default to Copy to 3DS Album
-    // DS captures have no companion bottom-screen frame to peek at.
-    if (!s_dsMode) {
-        ScreenshotPair *p = current_pair();
-        if (p) request_bottom_capture(p);
-    }
+    // Just invalidate -- the actual load is deferred until R is held.
+    invalidate_bottom_capture();
     s_state = APP_DETAIL;
 }
 
@@ -1713,10 +1829,11 @@ static void enter_detail_view(void)
 static void do_delete_current_pair(void)
 {
     int deletedAt = s_selected; // remember position before the list shrinks
+    int deletedItemIdx = (s_selected >= 0 && s_selected < s_visibleCount)
+                            ? s_visibleIndices[s_selected] : -1;
 
     if (s_dsMode) {
-        int idx = (s_selected >= 0 && s_selected < s_visibleCount)
-                    ? s_visibleIndices[s_selected] : -1;
+        int idx = deletedItemIdx;
         if (s_dsTab == DS_TAB_NDS_BOOTSTRAP) {
             // Deleting from the tar means a compacting rewrite, not a
             // file removal -- and the index refers to a tar slot, not
@@ -1730,11 +1847,19 @@ static void do_delete_current_pair(void)
         if (p) fs_delete_pair(p);
     }
 
-    free_eye_texture(&s_bottomCapture);
-    s_bottomCaptureRequested = false;
+    invalidate_bottom_capture();
 
-    free_all_thumbnails();
-    memset(s_thumbs, 0, sizeof(s_thumbs));
+    // Only the deleted entry's thumbnail is actually invalid -- every
+    // other one is still correct, just at a shifted index. Rebuilding
+    // all of them meant re-reading the whole library off the SD card
+    // after every single delete, which is the bulk of why deleting had
+    // become slow on a large library.
+    if (deletedItemIdx >= 0) {
+        remove_thumbnail_at(deletedItemIdx);
+    } else {
+        free_all_thumbnails();
+        memset(s_thumbs, 0, sizeof(s_thumbs));
+    }
 
     if (s_dsMode) {
         if (s_dsTab == DS_TAB_NDS_BOOTSTRAP) {
@@ -1770,13 +1895,10 @@ static void do_delete_current_pair(void)
         int newCount = detail_menu_item_count();
         if (s_detailMenuSelection >= newCount) s_detailMenuSelection = newCount - 1;
 
-        // Same bottom-capture request enter_detail_view() does --
-        // without it, R would peek at the deleted screenshot's now-
-        // stale capture instead of the newly-landed-on one's.
-        if (!s_dsMode) {
-            ScreenshotPair *np = current_pair();
-            if (np) request_bottom_capture(np);
-        }
+        // Invalidate only -- without this, R would peek at the deleted
+        // screenshot's now-stale capture. The load itself waits until
+        // the peek is actually engaged.
+        invalidate_bottom_capture();
         op_complete(APP_DETAIL);
     } else {
         op_complete(APP_BROWSE);
@@ -1820,8 +1942,12 @@ static void reload_current_mode(void)
 // Refreshes whether the DS toggle should appear at all.
 static void refresh_ds_availability(void)
 {
-    s_dsTarCount = ds_count_tar_screenshots();
-    s_dsAvailable = (s_dsTarCount > 0) || (ds_count_extracted() > 0);
+    // Yes/no only -- s_dsTarCount is never displayed anywhere, just
+    // compared against zero, so the early-exit variants avoid walking
+    // all 50 tar slots and the whole extracted folder to answer it.
+    bool anyTar = ds_has_any_tar_screenshot();
+    s_dsTarCount = anyTar ? 1 : 0;
+    s_dsAvailable = anyTar || ds_has_any_extracted();
 }
 
 static void enter_ds_mode(void)
@@ -2129,8 +2255,6 @@ static bool item_is_widescreen(int idx)
     return idx < s_dsTarSlotCount && s_dsTarSlots[idx].widescreen;
 }
 
-<<<<<<< Updated upstream
-=======
 // ---- top/bottom merge (3DS only) ----------------------------------
 //
 // Deliberately simple: no stereo 3D, always writes a plain BMP the
@@ -2234,20 +2358,21 @@ static void do_merge_top_bottom(void)
         s_previewLoadedPairIndex = -1;
         s_previewRequestedPairIndex = -1;
 
-        s_lastSuccess = true;
-        snprintf(s_lastMessage, sizeof(s_lastMessage), "Screenshot merged");
-        snprintf(s_lastOutputPath, sizeof(s_lastOutputPath), "Added to your gallery");
+        // No confirmation popup on success: landing on the grid with
+        // the new merged thumbnail already highlighted *is* the
+        // feedback, and an extra "OK" screen after that was just
+        // friction for something already visually obvious.
         audio_play(SFX_COPY);
         s_thumbSfxMute = 45;
+        op_complete(APP_BROWSE);
     } else {
         s_lastSuccess = false;
         snprintf(s_lastMessage, sizeof(s_lastMessage), "Merge failed:");
         snprintf(s_lastOutputPath, sizeof(s_lastOutputPath), "%s", err[0] ? err : "Unknown error.");
+        op_complete(APP_RESULT);
     }
-    op_complete(APP_RESULT);
 }
 
->>>>>>> Stashed changes
 static void do_convert(void)
 {
     int idx = (s_selected >= 0 && s_selected < s_visibleCount)
@@ -2910,7 +3035,8 @@ static void draw_grid(void)
             bool sel = (visPos == s_selected);
 
             if (!builtOneThisFrame && !s_thumbs[idx].attempted) {
-                build_thumbnail(item_top_path(idx), item_data_offset(idx), &s_thumbs[idx]);
+                bool wantLetterbox = !s_dsMode && idx < s_pairCount && s_pairs[idx].isCombined;
+                build_thumbnail(item_top_path(idx), item_data_offset(idx), wantLetterbox, &s_thumbs[idx]);
                 builtOneThisFrame = true;
                 if (s_thumbs[idx].tex.valid && s_thumbSfxMute == 0) audio_play(SFX_THUMB_LOAD);
             }
@@ -2921,11 +3047,15 @@ static void draw_grid(void)
 
             draw_thumbnail(&s_thumbs[idx], x, y, CELL_W, CELL_H);
 
-            // 3D/2D badge, top-left corner of the cell, over the thumbnail.
-            // 3DS mode badges the stereo/flat distinction; DS mode
-            // badges which library the item came from instead.
+            // 3D/2D/merged badge, top-left corner of the cell, over
+            // the thumbnail. 3DS mode badges the stereo/flat/combined
+            // distinction; DS mode badges which library the item came
+            // from instead.
             if (!s_dsMode) {
-                draw_icon(item_has_3d(idx) ? ICON_BADGE_3D : ICON_BADGE_2D, x + 2, y + 2);
+                IconId badge = ICON_BADGE_2D;
+                if (item_has_3d(idx))            badge = ICON_BADGE_3D;
+                else if (s_pairs[idx].isCombined) badge = ICON_BADGE_MERGED;
+                draw_icon(badge, x + 2, y + 2);
             } else {
                 draw_icon(s_dsTab == DS_TAB_NDS_BOOTSTRAP ? ICON_BADGE_DS_TAR
                                                           : ICON_BADGE_DS_EXTRACTED,
@@ -2978,9 +3108,6 @@ static float detail_menu_item_y(int i) { return DETAIL_MENU_TOP + i * (DETAIL_ME
 // meaning (Copy / Delete).
 static int detail_menu_item_count(void)
 {
-<<<<<<< Updated upstream
-    return (s_dsMode && s_dsTab == DS_TAB_NDS_BOOTSTRAP) ? 3 : 2;
-=======
     if (s_dsMode) return (s_dsTab == DS_TAB_NDS_BOOTSTRAP) ? 3 : 2;
     // Merge only makes sense when there's a real bottom capture to
     // merge with -- this also rules out offering it on an entry
@@ -2993,7 +3120,6 @@ static int detail_menu_item_count(void)
     int idx = s_previewLoadedPairIndex;
     bool canMerge = idx >= 0 && idx < s_pairCount && s_pairs[idx].botPath[0];
     return canMerge ? 3 : 2; // Copy / [Merge] / Delete
->>>>>>> Stashed changes
 }
 
 static void draw_detail_menu(void)
@@ -3015,9 +3141,13 @@ static void draw_detail_menu(void)
     draw_header("More Info", dateBuf);
 
     int count = detail_menu_item_count();
-    const char **labels = (count == 3)
-        ? (const char *[]){"Extract Screenshot", "Copy to 3DS Album", "Delete"}
-        : (const char *[]){"Copy to 3DS Album", "Delete"};
+    const char **labels = s_dsMode
+        ? ((count == 3)
+            ? (const char *[]){"Extract Screenshot", "Copy to 3DS Album", "Delete"}
+            : (const char *[]){"Copy to 3DS Album", "Delete"})
+        : ((count == 3)
+            ? (const char *[]){"Copy to 3DS Album", "Merge Top/Bottom Screens", "Delete"}
+            : (const char *[]){"Copy to 3DS Album", "Delete"});
 
     for (int i = 0; i < count; i++) {
         float y = detail_menu_item_y(i);
@@ -3222,7 +3352,7 @@ static void draw_by_date_menu(void)
 {
     draw_header(s_dsMode ? "Filters > By Extraction Date" : "Filters > By Date", filter_mode_label());
 
-    char yearBuf[8], monthBuf[16], dayBuf[8];
+    char yearBuf[16], monthBuf[16], dayBuf[8];
     if (s_filterYear > 0) snprintf(yearBuf, sizeof(yearBuf), "%d", s_filterYear);
     else snprintf(yearBuf, sizeof(yearBuf), "All");
     snprintf(monthBuf, sizeof(monthBuf), "%s", s_filterMonth == 0 ? "All" : MONTH_NAMES[s_filterMonth - 1]);
@@ -3506,6 +3636,17 @@ static void draw_bottom_screen(void)
     case APP_QUIT_CONFIRM:
         draw_grid();
         draw_confirm_popup("Quit Comet?", NULL, "Cancel", "Yes", s_confirmSelection);
+        break;
+
+    case APP_MERGE_CONFIRM:
+        draw_detail_menu();
+        draw_confirm_popup("Combine both Top and Bottom", "screens into one picture?",
+                            "Cancel", "Yes", s_confirmSelection);
+        break;
+
+    case APP_MERGING:
+        draw_detail_menu();
+        draw_popup("Merging takes a while...", "Don't remove SD card!", true, false);
         break;
 
     case APP_MODE_SWITCHING:
@@ -3805,6 +3946,7 @@ bool ui_frame(void)
             // separate "reset" logic needed.
             if (tapped && point_in_rect(touch.px, touch.py, 140, 0, 40, HEADER_H)) {
                 if (register_icon_tap_and_check_triple()) {
+                    load_easter_egg_images(); // no-op after the first time
                     audio_play(SFX_EASTER_EGG);
                     s_state = APP_EASTER_EGG;
                 }
@@ -3843,7 +3985,10 @@ bool ui_frame(void)
         u32 held = hidKeysHeld();
         // "Show bottom" is a 3DS-only peek -- DS captures have no
         // companion bottom frame, and R there is free for other use.
-        bool rHeld = !s_dsMode && (held & KEY_R) != 0;
+        bool rHeld = !s_dsMode && ((held & KEY_R) != 0 || s_touchHoldingShowBottom);
+        // Load on demand, the first frame the peek is actually engaged
+        // -- rather than speculatively on every navigation.
+        if (rHeld) maybe_request_bottom_capture();
         poll_bottom_capture();
 
         // Hidden L+R: duplicate this screenshot. Checked before the
@@ -3907,13 +4052,10 @@ bool ui_frame(void)
                     // re-clamp rather than leave the cursor past the end.
                     int newCount = detail_menu_item_count();
                     if (s_detailMenuSelection >= newCount) s_detailMenuSelection = newCount - 1;
-                    // Same bottom-capture request the detail view does
-                    // on entry -- without this, R would still peek at
-                    // the previously-selected screenshot's bottom frame.
-                    if (!s_dsMode) {
-                        ScreenshotPair *np = current_pair();
-                        if (np) request_bottom_capture(np);
-                    }
+                    // Invalidate only -- without this, R would still
+                    // peek at the previously-selected screenshot's
+                    // bottom frame. Loaded on demand when R is held.
+                    invalidate_bottom_capture();
                 }
             }
 
@@ -3928,23 +4070,37 @@ bool ui_frame(void)
             }
 
             if (chosen >= 0) {
-                // The tar tab prepends "Extract Screenshot", shifting
-                // Copy/Delete down one -- normalise to a shared action
-                // id so the dispatch below stays readable.
-                int action = chosen;
-                if (menuCount == 3) {
-                    if (chosen == 0) action = 2; // Extract (tar tab only)
-                    else             action = chosen - 1;
-                }
-
-                if (action == 0) {
-                    begin_convert();
-                } else if (action == 1) {
-                    s_confirmSelection = 0;
-                    s_state = APP_DETAIL_DELETE_CONFIRM;
+                if (s_dsMode && s_dsTab == DS_TAB_NDS_BOOTSTRAP) {
+                    // [0] Extract  [1] Copy  [2] Delete
+                    if (chosen == 0) {
+                        s_confirmSelection = 1; // default to Extract
+                        s_state = APP_DS_ONE_EXTRACT_PROMPT;
+                    } else if (chosen == 1) {
+                        begin_convert();
+                    } else {
+                        s_confirmSelection = 0;
+                        s_state = APP_DETAIL_DELETE_CONFIRM;
+                    }
+                } else if (s_dsMode) {
+                    // SD Card tab: [0] Copy  [1] Delete
+                    if (chosen == 0) {
+                        begin_convert();
+                    } else {
+                        s_confirmSelection = 0;
+                        s_state = APP_DETAIL_DELETE_CONFIRM;
+                    }
                 } else {
-                    s_confirmSelection = 1; // default to Extract
-                    s_state = APP_DS_ONE_EXTRACT_PROMPT;
+                    // 3DS: [0] Copy  [1] Delete  -- or, when a real
+                    // bottom capture exists, [0] Copy [1] Merge [2] Delete
+                    if (chosen == 0) {
+                        begin_convert();
+                    } else if (menuCount == 3 && chosen == 1) {
+                        s_confirmSelection = 0; // default to Cancel
+                        s_state = APP_MERGE_CONFIRM;
+                    } else {
+                        s_confirmSelection = 0;
+                        s_state = APP_DETAIL_DELETE_CONFIRM;
+                    }
                 }
             }
         }
@@ -4029,6 +4185,27 @@ bool ui_frame(void)
         else if (pickedCancel) s_state = APP_BROWSE;
         break;
     }
+
+    case APP_MERGE_CONFIRM: {
+        float cx, cy, cw, ch, dx, dy, dw, dh;
+        popup_button_rect(0, 2, &cx, &cy, &cw, &ch);
+        popup_button_rect(1, 2, &dx, &dy, &dw, &dh);
+        if (kDown & (KEY_LEFT | KEY_RIGHT)) s_confirmSelection ^= 1;
+
+        bool pickedCancel = (kDown & KEY_B) ||
+            ((kDown & KEY_A) && s_confirmSelection == 0) ||
+            (tapped && point_in_rect(touch.px, touch.py, cx, cy, cw, ch));
+        bool pickedMerge  = ((kDown & KEY_A) && s_confirmSelection == 1) ||
+            (tapped && point_in_rect(touch.px, touch.py, dx, dy, dw, dh));
+
+        if (pickedMerge)        op_enter(APP_MERGING);
+        else if (pickedCancel)  s_state = APP_DETAIL;
+        break;
+    }
+
+    case APP_MERGING:
+        if (op_tick()) do_merge_top_bottom();
+        break;
 
     case APP_DS_INTRO_POPUP: {
         // Informational only -- any of A/B or the OK button dismisses.

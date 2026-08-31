@@ -16,6 +16,7 @@ typedef enum {
     ICON_BADGE_DS_EXTRACTED,
     ICON_TAB_L,
     ICON_TAB_R,
+    ICON_BADGE_MERGED,
     ICON_COUNT,
 } IconId;
 

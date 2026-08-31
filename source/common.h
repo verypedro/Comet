@@ -30,9 +30,23 @@
 // One discovered "photo" -- a left-eye bmp, optionally paired with a
 // right-eye bmp for stereoscopic 3D, plus the bottom-screen capture.
 typedef struct {
-    char timestamp[32];     // e.g. "2026-08-04_12-34-56.789"
+    // 32 was sized for Luma's own format ("2026-08-04_12-34-56.789",
+    // 23 chars). Forks like Nexus3DS insert a title ID between the
+    // timestamp and suffix ("..._000400000FF3AA00"), which runs to
+    // ~40 chars -- a title ID is always a fixed 16 hex digits in the
+    // 3DS ecosystem, so 64 gives comfortable headroom without needing
+    // to revisit this for a similar fork later. Truncating this field
+    // doesn't just cut the display date short: it's also used to
+    // build the expected top_right/bot filenames, so a truncated
+    // value made those lookups search for files that don't exist --
+    // silently breaking 3D detection and the bottom-screen capture
+    // for every screenshot from an affected fork.
+    char timestamp[64];     // e.g. "2026-08-04_12-34-56.789" (or longer, see above)
     char topPath[256];      // .../{timestamp}_top.bmp        (always present)
     char topRightPath[256]; // .../{timestamp}_top_right.bmp  (only if 3D was on)
     char botPath[256];      // .../{timestamp}_bot.bmp        (mono, no 3D)
     bool has3D;
+    bool isCombined;        // true for _cmb.bmp entries -- set by
+                             // scan_combined_in_dir(), never by the
+                             // regular _top.bmp scan
 } ScreenshotPair;

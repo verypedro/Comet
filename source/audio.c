@@ -14,6 +14,7 @@ typedef struct {
     u16         channels;
     ndspWaveBuf wave;
     bool        ok;
+    bool        attempted;  // load tried yet? (sounds load on first play)
 } Sfx;
 
 static Sfx  s_sfx[SFX_COUNT];
@@ -110,25 +111,42 @@ void audio_init(void)
     }
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
 
+    // Sounds themselves are loaded on first use, not here -- see
+    // ensure_sfx_loaded(). Loading all six up front meant reading
+    // ~640KB off the card before the app could show anything, and
+    // over a third of that was the easter egg jingle most people
+    // will never trigger.
     for (int i = 0; i < SFX_COUNT; i++) {
         memset(&s_sfx[i], 0, sizeof(s_sfx[i]));
-        if (!load_wav(SFX_PATHS[i], &s_sfx[i])) continue;
-
-        ndspChnReset(i);
-        ndspChnSetInterp(i, NDSP_INTERP_LINEAR);
-        ndspChnSetRate(i, (float)s_sfx[i].sampleRate);
-        ndspChnSetFormat(i, s_sfx[i].channels == 2 ? NDSP_FORMAT_STEREO_PCM16
-                                                    : NDSP_FORMAT_MONO_PCM16);
-
-        // Set the mix explicitly rather than trusting ndspChnReset's
-        // defaults: front-left and front-right at full volume.
-        float mix[12];
-        memset(mix, 0, sizeof(mix));
-        mix[0] = 1.0f; // front left
-        mix[1] = 1.0f; // front right
-        ndspChnSetMix(i, mix);
     }
     s_audioOk = true;
+}
+
+// Loads and configures one sound the first time it's actually played.
+// Each individual file is small enough that the one-off hitch is
+// imperceptible, and the biggest ones (Copy, Delete) only ever play
+// during operations that already hold a progress popup on screen.
+static void ensure_sfx_loaded(SfxId id)
+{
+    Sfx *s = &s_sfx[id];
+    if (s->attempted) return;
+    s->attempted = true; // set regardless, so a failed load isn't retried on every play
+
+    if (!load_wav(SFX_PATHS[id], s)) return;
+
+    ndspChnReset(id);
+    ndspChnSetInterp(id, NDSP_INTERP_LINEAR);
+    ndspChnSetRate(id, (float)s->sampleRate);
+    ndspChnSetFormat(id, s->channels == 2 ? NDSP_FORMAT_STEREO_PCM16
+                                          : NDSP_FORMAT_MONO_PCM16);
+
+    // Set the mix explicitly rather than trusting ndspChnReset's
+    // defaults: front-left and front-right at full volume.
+    float mix[12];
+    memset(mix, 0, sizeof(mix));
+    mix[0] = 1.0f; // front left
+    mix[1] = 1.0f; // front right
+    ndspChnSetMix(id, mix);
 }
 
 void audio_exit(void)
@@ -147,6 +165,7 @@ void audio_exit(void)
 void audio_play(SfxId id)
 {
     if (!s_audioOk || id < 0 || id >= SFX_COUNT) return;
+    ensure_sfx_loaded(id);
     Sfx *s = &s_sfx[id];
     if (!s->ok) return;
 

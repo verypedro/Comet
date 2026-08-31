@@ -34,6 +34,11 @@ typedef struct {
 // peeks 2 bytes per slot, never decoding any image data.
 int ds_count_tar_screenshots(void);
 
+// Cheap yes/no variants that stop at the first hit, for callers that
+// only need to know whether anything exists (the availability check).
+bool ds_has_any_tar_screenshot(void);
+bool ds_has_any_extracted(void);
+
 // A single occupied slot in screenshots.tar, addressable in place.
 typedef struct {
     long dataOffset;      // byte offset of the BMP payload within the tar

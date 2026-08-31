@@ -1,7 +1,26 @@
 # Changelog
 
-<<<<<<< Updated upstream
-=======
+## v3.1
+
+Performance and a small UX cleanup, no new features.
+
+### Faster
+
+- Deleting a 3DS screenshot is significantly faster on a large library
+  than it had become. Fixed a scan that was hitting the SD card far
+  more than it needed to on every delete, made deleting keep the
+  thumbnails that didn't actually change instead of rebuilding all of
+  them, and stopped a background load from happening speculatively on
+  every navigation when it's usually never needed
+- Faster startup: sound effects now load only when actually needed,
+  instead of all of them being read every time the app opens
+
+### Changed
+
+- Merging no longer shows a confirmation popup on success. Landing on
+  the grid with the new merged screenshot's thumbnail already visible
+  is confirmation enough
+
 ## v3.0
 
 ### Nexus3DS support
@@ -54,7 +73,6 @@ that is plain Luma or Nexus3DS.
 
 ## v2.0
 
->>>>>>> Stashed changes
 Everything notable added since the `v1.0` GitHub release, which only
 covered browsing/copying/deleting 3DS screenshots. This update's
 headline addition is full DS screenshot support.

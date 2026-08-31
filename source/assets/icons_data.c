@@ -713,8 +713,6 @@ static const unsigned char icon_tab_r_data[512] = {
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 };
 
-<<<<<<< Updated upstream
-=======
 static const unsigned char icon_badge_merged_data[1024] = {
     0,255,255,255,255,31,31,31,255,31,31,31,255,159,159,159,255,31,31,31,255,31,31,31,255,255,255,255,255,255,255,255,
     255,0,0,0,255,255,255,255,255,0,0,0,255,255,255,255,255,229,229,229,255,150,150,150,255,187,187,187,254,17,17,17,
@@ -747,7 +745,6 @@ static const unsigned char icon_badge_merged_data[1024] = {
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 };
 
->>>>>>> Stashed changes
 const EmbeddedIcon g_embeddedIcons[ICON_COUNT] = {
     [ICON_COMET] = { icon_comet_data, 32, 32, 20, 18 },
     [ICON_BADGE_3D] = { icon_badge_3d_data, 16, 16, 15, 14 },
@@ -764,4 +761,5 @@ const EmbeddedIcon g_embeddedIcons[ICON_COUNT] = {
     [ICON_BADGE_DS_EXTRACTED] = { icon_badge_ds_extracted_data, 16, 16, 12, 13 },
     [ICON_TAB_L] = { icon_tab_l_data, 16, 16, 13, 9 },
     [ICON_TAB_R] = { icon_tab_r_data, 16, 8, 12, 8 },
+    [ICON_BADGE_MERGED] = { icon_badge_merged_data, 16, 16, 14, 13 },
 };

@@ -808,3 +808,110 @@ already visible without it. Removed for the success path only;
 failure still shows `APP_RESULT` with an error message, since a failed
 merge has nothing visible in the grid to explain what happened the way
 a new thumbnail does for success.
+
+
+## Cleanup pass
+
+Smaller findings from a survey of remaining per-frame work and dead
+code:
+
+- **The footer parsed every label twice per frame.** `draw_footer_hints`
+  called `draw_text_vcenter` to draw each label, then `measure_text` on
+  the same string to size its touch hitbox -- each parsing and
+  optimizing the glyph list independently. Added
+  `draw_text_vcenter_measured`, which does both in one pass. This
+  matters more than it sounds because the footer draws on *every*
+  screen, including while scrolling the grid.
+- The header's `"+"` separator was re-measured every frame despite
+  being a constant; cached on first use. (`modeLabel` next to it still
+  varies, so it stays measured per frame.)
+- Confirmed no file I/O is reachable from the per-frame drawing path --
+  worth checking explicitly, since the tar fingerprinting in
+  `apply_tar_widescreen_prefs()` does real I/O per slot. All six of its
+  call sites are inside operation handlers, none in drawing.
+- `enter_ds_mode` was calling the full-walk `ds_count_tar_screenshots()`
+  and `ds_count_extracted()` on every mode switch, then only comparing
+  the results against zero -- the same waste already fixed in
+  `refresh_ds_availability()`. Switched to the early-exit variants;
+  verified the rewritten boolean is logically identical across all four
+  input combinations.
+- Removed genuinely dead code: `bmp_load_thumbnail` (every caller now
+  goes through `bmp_load_thumbnail_at` since the offset and letterbox
+  parameters were added), plus `ds_count_tar_screenshots`,
+  `ds_count_extracted`, and the `count_cb` callback that only existed
+  to serve them.
+
+
+## Grid fill: time budget instead of a fixed one-per-frame cap
+
+`build_thumbnail` runs on the main thread inside `draw_grid`, so each
+one costs real frame time -- which is why it was capped at exactly one
+per frame. But that cap is a *fixed guess* at how much fits in a
+frame, and it's pessimistic whenever the card is faster or the images
+smaller than the guess assumed.
+
+Replaced with a time budget: always build at least one (guaranteeing
+progress), then keep building only while under ~8ms for the frame.
+The important property is that this can never be **slower** than the
+old behaviour -- if a single thumbnail already exceeds the budget, it
+still builds exactly one per frame, identical to before. On anything
+faster, the grid fills proportionally quicker, with no hardcoded
+assumption about which case a given console is in.
+
+Modelled across a range of per-thumbnail costs: at 1ms it builds 8 per
+frame (grid fills in 2 frames instead of 16), at 8ms and above it
+settles back to 1 per frame exactly as before.
+
+One consequence worth handling: `SFX_THUMB_LOAD` fired per thumbnail
+built. With several landing in one frame that would re-trigger the
+same ndsp channel repeatedly and clip each into a mess, so it now
+plays at most once per frame.
+
+
+## On-disk thumbnail cache
+
+Sampling one thumbnail means opening the source BMP and doing ~30
+separate seek+read pairs to pull one representative row per output
+row. The *result* is only 4KB. Caching those results
+(`sd:/3ds/Comet/thumbcache.bin`, ~286KB for a full 64-screenshot
+library) turns filling the grid into one sequential read instead of
+dozens of scattered ones.
+
+### Why this is safe
+
+The property that makes a thumbnail cache safe rather than a source of
+wrong-image bugs: **it is only ever consulted by the exact path of a
+file the scanner just found on disk.** A stale entry -- for something
+deleted outside Comet, say -- is therefore never queried and can never
+be displayed. It simply occupies a slot until it ages out.
+
+On top of that, entries are keyed by `path + byte offset` (the offset
+matters for nds-bootstrap tar entries, which all share one path) and
+validated against the source's file size, so a file replaced at the
+same path with differently-sized content is a miss rather than a stale
+hit. The file itself carries a magic number and version; anything
+unrecognised is discarded and rebuilt rather than trusted.
+
+### Keeping deletion fast
+
+Deleting forgets the relevant entries **in memory only**
+(`thumb_cache_forget`), gathered before the list changes while paths
+still resolve -- single delete and batch delete alike. No file I/O
+happens on the delete path at all.
+
+The cache file is rewritten later, on the first frame where nothing
+was built (i.e. the visible grid has settled). Writing after every new
+thumbnail would have put a file write in the middle of the fill it
+exists to speed up.
+
+### Verified
+
+Twelve behavioural checks compiled and run against the real logic:
+hit/miss on path, offset and size; changed-size correctly missing
+rather than returning stale data; re-storing replacing rather than
+duplicating; `forget` removing exactly one entry and leaving others
+intact; forgetting an absent entry being harmless; and eviction
+keeping the newest while dropping the oldest once full. Plus a
+file-format round trip confirming byte-exact reload, no struct padding
+surprises (4584 bytes/entry as designed), and correct rejection of a
+corrupt header.

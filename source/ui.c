@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <math.h>
 #include <time.h>  // duplicate/import timestamps
+#include <sys/stat.h>  // stat() for thumbnail cache validation
 #include <3ds/thread.h>
 #include <3ds/synchronization.h>
 #define PI_F 3.14159265f
@@ -1083,7 +1084,7 @@ static void free_preview_textures(void)
 
 // Grid thumbnails, as real (tiny) GPU textures instead of a grid of
 // solid-color rectangles. The underlying sampling is unchanged --
-// still the fast bmp_load_thumbnail() that reads only a handful of
+// still the fast bmp_load_thumbnail_at() that reads only a handful of
 // rows off the SD card -- but letting the GPU's bilinear filtering
 // smooth between those samples looks dramatically better than drawing
 // each sample as a hard-edged rectangle, for the same source data.
@@ -1096,15 +1097,164 @@ typedef struct {
 
 static Thumbnail s_thumbs[MAX_PAIRS];
 
+// ---- on-disk thumbnail cache ---------------------------------------
+//
+// Sampling a thumbnail means opening the source BMP and doing ~30
+// separate seek+read pairs to pull one representative row per output
+// row. The *result* is only 4KB. Caching those results turns the whole
+// grid into a single sequential read instead of dozens of scattered
+// ones.
+//
+// Safety: the cache is only ever consulted by the exact path of a file
+// the scanner *just found on disk*. A stale entry (for something
+// deleted outside Comet, say) is therefore never queried and can't be
+// displayed -- it just occupies a slot until it ages out. That property
+// is what makes this safe rather than a source of wrong-thumbnail bugs.
+// Source size is stored as a second check, so a file replaced at the
+// same path with differently-sized content is also caught.
+#define THUMB_CACHE_PATH SD_ROOT "/3ds/Comet/thumbcache.bin"
+#define THUMB_CACHE_MAGIC 0x43544843u // "CTHC"
+#define THUMB_CACHE_VERSION 1u
+#define THUMB_RGB_BYTES (THUMB_COLS * THUMB_ROWS * 3)
+
+typedef struct {
+    char path[256];
+    u32  base;      // byte offset within path (nonzero only for tar entries)
+    u32  srcSize;   // source file size, for validation
+    u8   rgb[THUMB_RGB_BYTES];
+} ThumbCacheEntry;
+
+static ThumbCacheEntry s_thumbCache[MAX_PAIRS];
+static int  s_thumbCacheCount = 0;
+static bool s_thumbCacheLoaded = false;
+static bool s_thumbCacheDirty = false;
+
+static u32 file_size_of(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return (u32)st.st_size;
+}
+
+static void load_thumb_cache(void)
+{
+    if (s_thumbCacheLoaded) return;
+    s_thumbCacheLoaded = true; // set regardless -- a failed load isn't retried every frame
+
+    FILE *f = fopen(THUMB_CACHE_PATH, "rb");
+    if (!f) return;
+
+    u32 hdr[3]; // magic, version, count
+    if (fread(hdr, sizeof(u32), 3, f) != 3 ||
+        hdr[0] != THUMB_CACHE_MAGIC || hdr[1] != THUMB_CACHE_VERSION) {
+        fclose(f);
+        return; // wrong/old format -- just start fresh, it'll be rewritten
+    }
+
+    int count = (int)hdr[2];
+    if (count > MAX_PAIRS) count = MAX_PAIRS;
+    if (count < 0) count = 0;
+
+    size_t got = fread(s_thumbCache, sizeof(ThumbCacheEntry), (size_t)count, f);
+    s_thumbCacheCount = (int)got;
+    fclose(f);
+}
+
+static void save_thumb_cache(void)
+{
+    fs_ensure_dir_exists(SD_ROOT "/3ds/Comet");
+    FILE *f = fopen(THUMB_CACHE_PATH, "wb");
+    if (!f) return;
+
+    u32 hdr[3] = { THUMB_CACHE_MAGIC, THUMB_CACHE_VERSION, (u32)s_thumbCacheCount };
+    if (fwrite(hdr, sizeof(u32), 3, f) == 3) {
+        fwrite(s_thumbCache, sizeof(ThumbCacheEntry), (size_t)s_thumbCacheCount, f);
+    }
+    fclose(f);
+    s_thumbCacheDirty = false;
+}
+
+// Returns the cached RGB for this exact source, or NULL.
+static const u8 *thumb_cache_lookup(const char *path, long base, u32 srcSize)
+{
+    for (int i = 0; i < s_thumbCacheCount; i++) {
+        ThumbCacheEntry *e = &s_thumbCache[i];
+        if (e->base == (u32)base && e->srcSize == srcSize &&
+            strcmp(e->path, path) == 0) {
+            return e->rgb;
+        }
+    }
+    return NULL;
+}
+
+static void thumb_cache_store(const char *path, long base, u32 srcSize, const u8 *rgb)
+{
+    // Replace an existing entry for the same source if there is one
+    // (e.g. the file changed size), rather than accumulating duplicates.
+    ThumbCacheEntry *slot = NULL;
+    for (int i = 0; i < s_thumbCacheCount; i++) {
+        if (s_thumbCache[i].base == (u32)base && strcmp(s_thumbCache[i].path, path) == 0) {
+            slot = &s_thumbCache[i];
+            break;
+        }
+    }
+    if (!slot) {
+        if (s_thumbCacheCount < MAX_PAIRS) {
+            slot = &s_thumbCache[s_thumbCacheCount++];
+        } else {
+            // Full: drop the oldest entry. Stale entries age out this
+            // way without needing any explicit pruning pass.
+            memmove(&s_thumbCache[0], &s_thumbCache[1],
+                    (size_t)(MAX_PAIRS - 1) * sizeof(ThumbCacheEntry));
+            slot = &s_thumbCache[MAX_PAIRS - 1];
+        }
+    }
+
+    snprintf(slot->path, sizeof(slot->path), "%s", path);
+    slot->base = (u32)base;
+    slot->srcSize = srcSize;
+    memcpy(slot->rgb, rgb, THUMB_RGB_BYTES);
+    s_thumbCacheDirty = true;
+}
+
+// Drops the cache entry for one source, used when its file is deleted.
+// In-memory only -- the file is rewritten later, so deleting stays fast.
+static void thumb_cache_forget(const char *path, long base)
+{
+    if (!path) return;
+    for (int i = 0; i < s_thumbCacheCount; i++) {
+        if (s_thumbCache[i].base == (u32)base && strcmp(s_thumbCache[i].path, path) == 0) {
+            if (i < s_thumbCacheCount - 1) {
+                memmove(&s_thumbCache[i], &s_thumbCache[i + 1],
+                        (size_t)(s_thumbCacheCount - 1 - i) * sizeof(ThumbCacheEntry));
+            }
+            s_thumbCacheCount--;
+            s_thumbCacheDirty = true;
+            return;
+        }
+    }
+}
+
 static void build_thumbnail(const char *bmpPath, long base, bool letterbox, Thumbnail *out)
 {
     out->attempted = true;
 
     u8 rgb[THUMB_COLS * THUMB_ROWS * 3];
     char err[64];
-    if (!bmp_load_thumbnail_at(bmpPath, base, THUMB_COLS, THUMB_ROWS, letterbox, rgb, err, sizeof(err))) {
-        free_eye_texture(&out->tex);
-        return;
+
+    load_thumb_cache(); // no-op after the first call
+
+    // A cache hit skips the file open and ~30 seeks entirely.
+    u32 srcSize = file_size_of(bmpPath);
+    const u8 *cached = (srcSize > 0) ? thumb_cache_lookup(bmpPath, base, srcSize) : NULL;
+    if (cached) {
+        memcpy(rgb, cached, THUMB_RGB_BYTES);
+    } else {
+        if (!bmp_load_thumbnail_at(bmpPath, base, THUMB_COLS, THUMB_ROWS, letterbox, rgb, err, sizeof(err))) {
+            free_eye_texture(&out->tex);
+            return;
+        }
+        if (srcSize > 0) thumb_cache_store(bmpPath, base, srcSize, rgb);
     }
 
     u32 texW = next_pow2((u32)THUMB_COLS); if (texW < 8) texW = 8;
@@ -1390,6 +1540,22 @@ static void draw_text_vcenter(float x, float y, float h, float scale, u32 color,
     C2D_DrawText(&t, C2D_WithColor, x, y + (h - th) / 2, 0.0f, scale, scale, color);
 }
 
+// Draws and returns the width in one pass. Callers that need both
+// (the footer, which lays hints out left-to-right and also needs each
+// label's width for its touch hitbox) would otherwise parse and
+// optimize the same string twice per frame -- once to draw it, once
+// to measure it.
+static float draw_text_vcenter_measured(float x, float y, float h, float scale, u32 color, const char *str)
+{
+    C2D_Text t;
+    C2D_TextFontParse(&t, s_fontRegular, s_dynBuf, str);
+    C2D_TextOptimize(&t);
+    float tw, th;
+    C2D_TextGetDimensions(&t, scale, scale, &tw, &th);
+    C2D_DrawText(&t, C2D_WithColor, x, y + (h - th) / 2, 0.0f, scale, scale, color);
+    return tw;
+}
+
 // SemiBold variant -- now used for exactly one thing: the page title
 // in the header's left slot. It's the only place SemiBold appears
 // anywhere in the app since the old centred "Comet" wordmark (which
@@ -1495,8 +1661,7 @@ static void draw_footer_hints(const FooterHint *hints, int count)
         u32 tint = hints[i].disabled ? C2D_Color32(0xFD, 0xFD, 0xFD, 0x80) : COLOR_TEXT;
         draw_icon_tinted(hints[i].icon, x, FOOTER_Y + (FOOTER_H - ih) / 2, hints[i].disabled);
         x += iw + gapIconLabel;
-        draw_text_vcenter(x, FOOTER_Y, FOOTER_H, TEXT_12, tint, hints[i].label);
-        float labelW = measure_text(TEXT_12, hints[i].label);
+        float labelW = draw_text_vcenter_measured(x, FOOTER_Y, FOOTER_H, TEXT_12, tint, hints[i].label);
 
         if (s_footerHitCount < 8) {
             FooterHitbox *hb = &s_footerHits[s_footerHitCount++];
@@ -1832,6 +1997,14 @@ static void do_delete_current_pair(void)
     int deletedItemIdx = (s_selected >= 0 && s_selected < s_visibleCount)
                             ? s_visibleIndices[s_selected] : -1;
 
+    // Drop this screenshot's cached thumbnail before the list changes,
+    // while its path is still resolvable. In-memory only -- the cache
+    // file gets rewritten on the next settled frame, so deleting
+    // doesn't pay for any extra file I/O.
+    if (deletedItemIdx >= 0) {
+        thumb_cache_forget(item_top_path(deletedItemIdx), item_data_offset(deletedItemIdx));
+    }
+
     if (s_dsMode) {
         int idx = deletedItemIdx;
         if (s_dsTab == DS_TAB_NDS_BOOTSTRAP) {
@@ -1954,8 +2127,11 @@ static void enter_ds_mode(void)
 {
     s_dsMode = true;
 
-    int tarCount = ds_count_tar_screenshots();
-    int sdCount  = ds_count_extracted();
+    // Both are only compared against zero below, so the early-exit
+    // checks are enough -- no need to walk all 50 tar slots and the
+    // whole extracted folder just to ask "is there anything here?"
+    bool anyTar = ds_has_any_tar_screenshot();
+    bool anySd  = ds_has_any_extracted();
     bool firstTime = !ds_intro_already_seen();
 
     if (firstTime) {
@@ -1964,7 +2140,7 @@ static void enter_ds_mode(void)
     } else {
         // Defaults to SD Card, but won't land on an empty tab if the
         // other one actually has something to show.
-        s_dsTab = (sdCount > 0 || tarCount == 0) ? DS_TAB_SD_CARD : DS_TAB_NDS_BOOTSTRAP;
+        s_dsTab = (anySd || !anyTar) ? DS_TAB_SD_CARD : DS_TAB_NDS_BOOTSTRAP;
     }
 
     if (firstTime) {
@@ -2563,6 +2739,13 @@ static void begin_batch_delete(void)
 static void do_batch_delete_selected(void)
 {
     int total = item_count();
+
+    // Forget cached thumbnails for everything about to go, while the
+    // paths still resolve. In-memory only, same as single delete.
+    for (int i = 0; i < total; i++) {
+        if (s_batchSelected[i]) thumb_cache_forget(item_top_path(i), item_data_offset(i));
+    }
+
     if (s_dsMode && s_dsTab == DS_TAB_NDS_BOOTSTRAP) {
         // Deleting tar slots compacts the remaining ones down, which
         // renumbers every index *above* the one removed. Walking
@@ -2847,7 +3030,12 @@ static void draw_header_full(const char *leftLabel, const char *rightLabel,
     if (showModeToggle && modeLabel) {
         // [L] + [R] <label>, right-aligned.
         float lw = icon_width(ICON_BTN_L), rw = icon_width(ICON_BTN_R);
-        float plusW  = measure_text(TEXT_9, "+");
+        // The "+" never changes, so measure it once rather than
+        // re-parsing a constant every frame. (modeLabel does change --
+        // "DS Mode" vs "3DS Mode" -- so it stays measured per frame.)
+        static float s_plusWidth = -1.0f;
+        if (s_plusWidth < 0.0f) s_plusWidth = measure_text(TEXT_9, "+");
+        float plusW  = s_plusWidth;
         float labelW = measure_text(TEXT_9, modeLabel);
         const float g = 3.0f;
         float total = lw + g + plusW + g + rw + 5.0f + labelW;
@@ -3022,7 +3210,21 @@ static void draw_grid(void)
     int totalRows = (s_visibleCount + GRID_COLS - 1) / GRID_COLS;
     int visRows = GRID_ROWS_CUR;
 
-    bool builtOneThisFrame = false;
+    // Thumbnail building happens here, on the main thread, so each one
+    // costs real frame time. This used to be capped at exactly one per
+    // frame -- a fixed guess at how much fits in a frame, which is
+    // pessimistic when the card is fast and the images are small.
+    //
+    // Instead: always build at least one (guaranteeing progress, and
+    // making this strictly no slower than the old behaviour), then
+    // keep going only while there's budget left in the frame. On a
+    // slow card that naturally settles back to one per frame; on a
+    // fast one the grid fills several times quicker. No hardcoded
+    // assumption about which case a given console is in.
+    const u64 THUMB_BUDGET_MS = 8; // half a 60fps frame, leaving room to actually draw
+    u64 thumbStartMs = osGetTime();
+    int builtThisFrame = 0;
+
     for (int r = 0; r < visRows; r++) {
         int gridRow = startRow + r;
         for (int c = 0; c < GRID_COLS; c++) {
@@ -3034,11 +3236,19 @@ static void draw_grid(void)
             float y = GRID_TOP + r * (CELL_H + CELL_SPACING_Y);
             bool sel = (visPos == s_selected);
 
-            if (!builtOneThisFrame && !s_thumbs[idx].attempted) {
+            bool budgetLeft = (builtThisFrame == 0) ||
+                              (osGetTime() - thumbStartMs < THUMB_BUDGET_MS);
+            if (budgetLeft && !s_thumbs[idx].attempted) {
                 bool wantLetterbox = !s_dsMode && idx < s_pairCount && s_pairs[idx].isCombined;
                 build_thumbnail(item_top_path(idx), item_data_offset(idx), wantLetterbox, &s_thumbs[idx]);
-                builtOneThisFrame = true;
-                if (s_thumbs[idx].tex.valid && s_thumbSfxMute == 0) audio_play(SFX_THUMB_LOAD);
+                builtThisFrame++;
+                // Only for the first build of the frame: several can
+                // now land in one frame, and re-triggering the same
+                // channel that fast would clip each one into a mess
+                // rather than sounding like the intended tick.
+                if (builtThisFrame == 1 && s_thumbs[idx].tex.valid && s_thumbSfxMute == 0) {
+                    audio_play(SFX_THUMB_LOAD);
+                }
             }
 
             if (sel) {
@@ -3082,6 +3292,14 @@ static void draw_grid(void)
         float thumbY = GRID_TOP + (trackH - thumbH) * startRow / maxStartRow;
         C2D_DrawRectSolid(313, GRID_TOP, 0, 3, trackH, COLOR_PANEL);
         C2D_DrawRectSolid(313, thumbY, 0, 3, thumbH, COLOR_DIM);
+    }
+
+    // Flush the cache only once nothing was built this frame -- i.e.
+    // the visible grid has settled. Writing after every new thumbnail
+    // would put a file write right in the middle of the fill it's
+    // meant to speed up.
+    if (s_thumbCacheDirty && builtThisFrame == 0) {
+        save_thumb_cache();
     }
 }
 

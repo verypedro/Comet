@@ -32,7 +32,6 @@ typedef struct {
 // How many non-blank screenshots the tar currently holds (0 if the tar
 // is missing/unreadable). Cheap: seeks the tar's entry headers and
 // peeks 2 bytes per slot, never decoding any image data.
-int ds_count_tar_screenshots(void);
 
 // Cheap yes/no variants that stop at the first hit, for callers that
 // only need to know whether anything exists (the availability check).
@@ -79,7 +78,6 @@ bool ds_delete_tar_slot(int slotIndex);
 unsigned long ds_slot_fingerprint(const DSTarSlot *slot);
 
 // How many screenshots have already been extracted to SD.
-int ds_count_extracted(void);
 
 // Extracts every non-blank slot into DS_SCREENSHOTS_DIR, naming each
 // file with the current time plus its slot number (so repeated imports

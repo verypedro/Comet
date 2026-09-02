@@ -84,25 +84,7 @@ static bool slot_is_real(FILE *f, long dataOffset, long size)
 
 typedef struct { FILE *f; int count; } CountCtx;
 
-static bool count_cb(const char *name, long off, long size, void *vctx)
-{
-    (void)name;
-    CountCtx *ctx = (CountCtx *)vctx;
-    if (slot_is_real(ctx->f, off, size)) ctx->count++;
-    return true;
-}
-
-int ds_count_tar_screenshots(void)
-{
-    FILE *f = fopen(SD_ROOT DS_TAR_PATH, "rb");
-    if (!f) return 0;
-    CountCtx ctx = { f, 0 };
-    tar_walk(f, count_cb, &ctx);
-    fclose(f);
-    return ctx.count;
-}
-
-// Stops at the first occupied slot instead of walking all 50.
+// Stops at the first occupied slot rather than walking all 50.
 // Callers that only need "is there anything in the tar?" (the boot-time
 // availability check) were paying for a full 50-slot walk -- roughly 50
 // seeks into a 5MB file -- to answer a yes/no question. In the common
@@ -294,22 +276,6 @@ int ds_scan_extracted(DSScreenshot *out, int max)
     closedir(dir);
 
     if (count > 1) qsort(out, count, sizeof(DSScreenshot), cmp_ds_desc);
-    return count;
-}
-
-int ds_count_extracted(void)
-{
-    DIR *dir = opendir(SD_ROOT DS_SCREENSHOTS_DIR);
-    if (!dir) return 0;
-
-    int count = 0;
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        const char *nm = ent->d_name;
-        size_t len = strlen(nm);
-        if (len >= 5 && strcasecmp(nm + len - 4, ".bmp") == 0) count++;
-    }
-    closedir(dir);
     return count;
 }
 

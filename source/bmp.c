@@ -25,7 +25,7 @@ static inline void rgb565_to_rgb888(u16 v, u8 *r, u8 *g, u8 *b)
     *b = (u8)((b5 << 3) | (b5 >> 2));
 }
 
-// Shared by both bmp_load() and bmp_load_thumbnail(): reads and
+// Shared by bmp_load() and bmp_load_thumbnail_at(): reads and
 // validates just the file/DIB header, leaving the read position at the
 // start of the header bytes (callers seek to dataOffset themselves).
 // `base` is the byte offset at which this BMP starts within the file
@@ -267,12 +267,6 @@ void bmp_free(RGBImage *img)
     if (img->pixels) free(img->pixels);
     img->pixels = NULL;
     img->width = img->height = 0;
-}
-
-bool bmp_load_thumbnail(const char *path, int cols, int rows,
-                         u8 *outRGB, char *outErr, size_t outErrSize)
-{
-    return bmp_load_thumbnail_at(path, 0, cols, rows, false, outRGB, outErr, outErrSize);
 }
 
 bool bmp_load_thumbnail_at(const char *path, long base, int cols, int rows,

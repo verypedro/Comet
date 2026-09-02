@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.2
+
+More performance work, short one this time.
+
+### Faster
+
+- The grid now fills noticeably quicker, especially on repeat visits.
+  Thumbnails are cached on the SD card after they're first built, so
+  reopening a screenshot library that's already been browsed is a
+  single quick read instead of rebuilding every thumbnail from scratch
+- Building thumbnails now adapts to how fast a given SD card actually
+  is, instead of assuming a fixed pace -- never slower than before,
+  often quite a bit faster
+
 ## v3.1
 
 Performance and a small UX cleanup, no new features.

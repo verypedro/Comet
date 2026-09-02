@@ -34,6 +34,3 @@ void bmp_free(RGBImage *img);
 // the source's full width/height maps directly onto cols x rows.
 bool bmp_load_thumbnail_at(const char *path, long base, int cols, int rows,
                             bool letterbox, u8 *outRGB, char *outErr, size_t outErrSize);
-
-bool bmp_load_thumbnail(const char *path, int cols, int rows,
-                         u8 *outRGB, char *outErr, size_t outErrSize);

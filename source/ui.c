@@ -393,9 +393,24 @@ static int s_thumbSfxMute = 0;
 static char s_dsWidescreenPaths[MAX_DS_SHOTS][256];
 static int  s_dsWidescreenPathCount = 0;
 
-#define WIDESCREEN_PREFS_PATH SD_ROOT "/3ds/Comet/widescreen.txt"
-#define DS_INTRO_SEEN_PATH    SD_ROOT "/3ds/Comet/ds_intro_seen.txt"
-#define TAR_WIDESCREEN_PATH   SD_ROOT "/3ds/Comet/widescreen_tar.txt"
+#define CONFIG_DIR             SD_ROOT "/3ds/Comet/config"
+#define WIDESCREEN_PREFS_PATH  CONFIG_DIR "/widescreen.txt"
+#define DS_INTRO_SEEN_PATH     CONFIG_DIR "/state"
+#define TAR_WIDESCREEN_PATH    CONFIG_DIR "/widescreen_tar.txt"
+
+// mkdir() on an already-existing directory still has to be issued and
+// still has to fail with EEXIST before fs_ensure_dir_exists can treat
+// that as success -- that's not free on real SD hardware, and it was
+// being paid on *every* save (widescreen toggle, DS-intro marker,
+// thumbnail cache) rather than once. Cached so it only ever runs once
+// per launch, however expensive a single call turns out to be.
+static bool s_configDirEnsured = false;
+static void ensure_config_dir_once(void)
+{
+    if (s_configDirEnsured) return;
+    s_configDirEnsured = true; // set regardless -- a failed create isn't worth retrying every save either
+    fs_ensure_dir_exists(CONFIG_DIR);
+}
 
 // Widescreen marks for tar screenshots are keyed on a content
 // fingerprint, not slot position -- see ds_slot_fingerprint().
@@ -427,7 +442,7 @@ static void save_tar_widescreen_prefs(void)
         }
     }
 
-    fs_ensure_dir_exists(SD_ROOT "/3ds/Comet");
+    ensure_config_dir_once();
     FILE *f = fopen(TAR_WIDESCREEN_PATH, "w");
     if (!f) return;
     for (int i = 0; i < s_tarWidescreenFpCount; i++) {
@@ -447,6 +462,9 @@ static void apply_tar_widescreen_prefs(void)
     }
 }
 
+// A one-time marker, deliberately saved without a file extension (see
+// DS_INTRO_SEEN_PATH) so it doesn't advertise itself as a text file.
+// Existence alone is the signal -- the content is just a placeholder.
 static bool ds_intro_already_seen(void)
 {
     FILE *f = fopen(DS_INTRO_SEEN_PATH, "r");
@@ -457,17 +475,18 @@ static bool ds_intro_already_seen(void)
 
 static void mark_ds_intro_seen(void)
 {
-    fs_ensure_dir_exists(SD_ROOT "/3ds/Comet");
+    ensure_config_dir_once();
     FILE *f = fopen(DS_INTRO_SEEN_PATH, "w");
     if (f) { fputs("1", f); fclose(f); }
 }
 
 static void save_widescreen_prefs(void)
 {
-    // Cheap defensive guard -- extraction always creates this folder
-    // first in practice, but this costs nothing if it already exists
-    // and removes any dependency on that ordering holding forever.
-    fs_ensure_dir_exists(SD_ROOT "/3ds/Comet");
+    // Genuinely load-bearing now, not just cheap insurance: config/ is
+    // a sibling of ds_screenshots/, not created as a side effect of
+    // extraction the way it used to be when this file lived directly
+    // under Comet's own folder.
+    ensure_config_dir_once();
     FILE *f = fopen(WIDESCREEN_PREFS_PATH, "w");
     if (!f) return; // best-effort -- losing this preference isn't worth surfacing an error over
     for (int i = 0; i < s_dsCount; i++) {
@@ -1112,7 +1131,7 @@ static Thumbnail s_thumbs[MAX_PAIRS];
 // is what makes this safe rather than a source of wrong-thumbnail bugs.
 // Source size is stored as a second check, so a file replaced at the
 // same path with differently-sized content is also caught.
-#define THUMB_CACHE_PATH SD_ROOT "/3ds/Comet/thumbcache.bin"
+#define THUMB_CACHE_PATH CONFIG_DIR "/thumbcache.bin"
 #define THUMB_CACHE_MAGIC 0x43544843u // "CTHC"
 #define THUMB_CACHE_VERSION 1u
 #define THUMB_RGB_BYTES (THUMB_COLS * THUMB_ROWS * 3)
@@ -1162,7 +1181,15 @@ static void load_thumb_cache(void)
 
 static void save_thumb_cache(void)
 {
-    fs_ensure_dir_exists(SD_ROOT "/3ds/Comet");
+    // Cleared unconditionally, success or failure -- a save that fails
+    // once shouldn't keep retrying the same failing sequence every
+    // settled frame forever. That was a real bug: this used to only
+    // clear on the success path, so any failure left it stuck true,
+    // and draw_grid's "flush once settled" check would re-invoke --
+    // and re-fail -- this every single settled frame from then on.
+    s_thumbCacheDirty = false;
+
+    ensure_config_dir_once();
     FILE *f = fopen(THUMB_CACHE_PATH, "wb");
     if (!f) return;
 
@@ -1171,7 +1198,6 @@ static void save_thumb_cache(void)
         fwrite(s_thumbCache, sizeof(ThumbCacheEntry), (size_t)s_thumbCacheCount, f);
     }
     fclose(f);
-    s_thumbCacheDirty = false;
 }
 
 // Returns the cached RGB for this exact source, or NULL.
@@ -3183,13 +3209,17 @@ static void draw_grid(void)
     } else {
         // The mode toggle only advertises itself when there's actually
         // something on the other side, and only on the album screen.
-        // The SD Card tab supports filtering, so it shows the same
-        // "<filter> (count)" label 3DS mode uses. The nds-bootstrap tab
-        // has no filter, so it keeps the plain mode name.
+        // Both DS tabs show the plain mode name by default, since the
+        // tab bar already shows each tab's own count -- repeating it
+        // in the header was redundant, and having the title change
+        // between tabs was jarring. The SD Card tab still falls back
+        // to the actual filter label when a real filter is active
+        // (3D Only, 2D Only, a date), since that's genuinely different
+        // information the tab bar's raw counts don't convey.
         const char *leftLabel;
-        if (!s_dsMode)                            leftLabel = filter_mode_label();
-        else if (s_dsTab == DS_TAB_SD_CARD)       leftLabel = filter_mode_label();
-        else                                      leftLabel = "Nintendo DS Mode";
+        if (!s_dsMode)                                                    leftLabel = filter_mode_label();
+        else if (s_dsTab == DS_TAB_SD_CARD && s_filterMode != FILTER_ALL) leftLabel = filter_mode_label();
+        else                                                              leftLabel = "Nintendo DS Mode";
 
         draw_header_full(leftLabel, NULL,
                          s_dsAvailable, s_dsMode ? "3DS Mode" : "DS Mode");
@@ -4265,6 +4295,7 @@ bool ui_frame(void)
                 int next = s_selected + ((kDown & KEY_RIGHT) ? 1 : -1);
                 if (next >= 0 && next < s_visibleCount && next != s_selected) {
                     s_selected = next;
+                    audio_play(SFX_BUTTON_QUIET);
                     // Menu shape can differ between screenshots (Merge
                     // only appears when there's a bottom capture), so
                     // re-clamp rather than leave the cursor past the end.

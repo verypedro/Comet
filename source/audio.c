@@ -21,12 +21,13 @@ static Sfx  s_sfx[SFX_COUNT];
 static bool s_audioOk = false;
 
 static const char *const SFX_PATHS[SFX_COUNT] = {
-    [SFX_BUTTON]     = "romfs:/sfx/ButtonPress.wav",
-    [SFX_POPUP]      = "romfs:/sfx/Pop-Up.wav",
-    [SFX_COPY]       = "romfs:/sfx/Copy.wav",
-    [SFX_DELETE]     = "romfs:/sfx/Delete.wav",
-    [SFX_THUMB_LOAD] = "romfs:/sfx/SmallThumbLoad.wav",
-    [SFX_EASTER_EGG] = "romfs:/sfx/EasterEgg.wav",
+    [SFX_BUTTON]       = "romfs:/sfx/ButtonPress.wav",
+    [SFX_BUTTON_QUIET] = "romfs:/sfx/ButtonPress.wav", // same file, lower mix below
+    [SFX_POPUP]        = "romfs:/sfx/Pop-Up.wav",
+    [SFX_COPY]         = "romfs:/sfx/Copy.wav",
+    [SFX_DELETE]       = "romfs:/sfx/Delete.wav",
+    [SFX_THUMB_LOAD]   = "romfs:/sfx/SmallThumbLoad.wav",
+    [SFX_EASTER_EGG]   = "romfs:/sfx/EasterEgg.wav",
 };
 
 static u32 rd32(const u8 *p) { return p[0] | (p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24); }
@@ -141,11 +142,16 @@ static void ensure_sfx_loaded(SfxId id)
                                           : NDSP_FORMAT_MONO_PCM16);
 
     // Set the mix explicitly rather than trusting ndspChnReset's
-    // defaults: front-left and front-right at full volume.
+    // defaults: front-left and front-right at full volume, except the
+    // quiet button variant, which gets its own lower level. Fixed once
+    // here per channel -- never toggled at play time -- so there's no
+    // risk of a reduced volume leaking into a later normal SFX_BUTTON
+    // play the way a dynamic mix change could.
+    float level = (id == SFX_BUTTON_QUIET) ? 0.55f : 1.0f;
     float mix[12];
     memset(mix, 0, sizeof(mix));
-    mix[0] = 1.0f; // front left
-    mix[1] = 1.0f; // front right
+    mix[0] = level; // front left
+    mix[1] = level; // front right
     ndspChnSetMix(id, mix);
 }
 

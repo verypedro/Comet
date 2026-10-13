@@ -4,6 +4,7 @@
 
 typedef enum {
     SFX_BUTTON,      // any face/shoulder button press
+    SFX_BUTTON_QUIET,// same sound, lower volume -- More-page Left/Right navigation
     SFX_POPUP,       // a popup appearing
     SFX_COPY,        // copy-to-album finished
     SFX_DELETE,      // delete finished

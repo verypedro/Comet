@@ -915,3 +915,61 @@ keeping the newest while dropping the oldest once full. Plus a
 file-format round trip confirming byte-exact reload, no struct padding
 surprises (4584 bytes/entry as designed), and correct rejection of a
 corrupt header.
+
+
+## Config folder, quieter navigation sound, and a header consistency fix
+
+**Quieter sound for More-page navigation.** Added `SFX_BUTTON_QUIET`,
+sharing `ButtonPress.wav`'s file but with its own fixed, lower channel
+mix (0.55 vs 1.0) set once at load time. Since each `SfxId` owns a
+dedicated ndsp channel, it can't leak a reduced volume into a later
+normal `SFX_BUTTON` play. Only plays when Left/Right in the More screen
+actually moves to a different screenshot, not when already at an edge.
+
+**Comet's own files moved into `config/`.** `widescreen.txt`,
+`widescreen_tar.txt`, `thumbcache.bin`, and the DS-intro marker now live
+under `sd:/3ds/Comet/config/`. The DS-intro marker is saved as `state`,
+with no extension, so it doesn't advertise itself as a text file.
+
+**DS mode's header stays "Nintendo DS Mode" on both tabs** when no filter
+is active. The SD Card tab still shows its real filter label and count
+when a filter *is* active, since that's information the tab bar's raw
+counts don't convey.
+
+**Extract-one's filename keeps its slot number.** Extract All shares one
+timestamp across an entire batch, so the slot number is the only thing
+keeping those filenames unique. Both paths use the same format.
+
+### Freeze after the config move, and what was actually found
+
+The first version of the config move introduced noticeable freezes after
+a grid load, after the DS-intro popup, and after toggling widescreen.
+Two things were found and fixed, and it's worth being precise about
+which is confirmed and which is inference:
+
+**Confirmed bug: `save_thumb_cache` could retry forever.** It only
+cleared `s_thumbCacheDirty` on its success path. Any failed save left the
+flag stuck true, and `draw_grid`'s "flush once the grid settles" check
+would then re-invoke it -- re-attempting the same failing sequence -- on
+every settled frame indefinitely. The flag is now cleared unconditionally
+at the top of the function. A save that fails once no longer retries.
+
+**Inference, not verified on hardware: repeated `mkdir()` cost.** Every
+save (widescreen toggle, DS-intro marker, thumbnail cache) was calling
+`fs_ensure_dir_exists`, which issues a `mkdir()` per path component and
+relies on `EEXIST` to detect "already there" -- work that's repeated on
+every call even when the directory long since exists. That cost was
+already present for the old two-level path, so on its own it doesn't
+obviously explain a multi-second freeze, and it hasn't been measured on
+real hardware. What it *can* be guaranteed is that the cost is paid at
+most once per launch: `ensure_config_dir_once()` caches the result, so
+however expensive a single call turns out to be, it can no longer repeat
+on every save.
+
+If freezes persist after this, the safe fallback is moving the config
+files back to the top level of `sd:/3ds/Comet/`, which matches the
+behaviour known not to freeze.
+
+Existing users' widescreen marks and thumbnail cache won't carry over
+automatically from the old top-level location -- both harmless one-time
+resets. The DS-intro popup will also show once more after updating.

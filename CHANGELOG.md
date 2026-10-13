@@ -1,5 +1,21 @@
 # Changelog
 
+## v3.3
+
+A few small quality-of-life changes, plus some behind-the-scenes
+cleanup.
+
+### Changed
+
+- Moving between screenshots with Left/Right on the More screen now
+  plays a quieter sound, distinct from a regular button press
+- Comet's own files (widescreen marks, thumbnail cache, first-run
+  marker) now live in a dedicated config folder instead of sitting
+  next to your DS screenshots
+- DS mode's header now consistently reads "Nintendo DS Mode" across
+  both tabs when no filter is active, instead of changing depending on
+  which tab you're on
+
 ## v3.2
 
 More performance work, short one this time.

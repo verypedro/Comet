@@ -318,6 +318,7 @@ static void rebuild_visible_list(void)
     int total = item_count();
     for (int i = 0; i < total; i++) {
         if (!pair_matches_filter(i)) continue;
+        if (s_visibleCount >= MAX_PAIRS) break; // never write past the array
         s_visibleIndices[s_visibleCount++] = i;
     }
     if (s_selected >= s_visibleCount) s_selected = s_visibleCount > 0 ? s_visibleCount - 1 : 0;
@@ -545,10 +546,16 @@ static void ds_rescan_preserving_widescreen(void)
     }
 }
 
+static int s_previewLoadedPairIndex = -1;
+
 static bool current_ds_widescreen(void)
 {
-    if (!s_dsMode || s_selected < 0 || s_selected >= s_visibleCount) return false;
-    int idx = s_visibleIndices[s_selected];
+    // Follows the screenshot actually on the top screen (the loaded
+    // one), not the selection, so the stretch never lands on the
+    // previous picture while the next one is still loading.
+    if (!s_dsMode) return false;
+    int idx = s_previewLoadedPairIndex;
+    if (idx < 0) return false;
     if (s_dsTab == DS_TAB_SD_CARD) return (idx >= 0 && idx < s_dsCount) && s_dsShots[idx].widescreen;
     return (idx >= 0 && idx < s_dsTarSlotCount) && s_dsTarSlots[idx].widescreen;
 }
@@ -713,11 +720,16 @@ typedef struct {
     long baseLeft;   // 0 for a standalone file, or a tar entry's payload offset
     long baseRight;
     bool needRight;
+    // Optional bottom-screen frame, decoded in the same job so the top
+    // preview and the bottom capture can land -- and be shown -- together.
+    char pathBottom[256];
+    bool needBottom;
 } LoaderJob;
 
 typedef struct {
     u8  *dataLeft;  u32 texWLeft,  texHLeft,  imgWLeft,  imgHLeft;
     u8  *dataRight; u32 texWRight, texHRight, imgWRight, imgHRight; // dataRight NULL if not needed/failed
+    u8  *dataBottom; u32 texWBottom, texHBottom, imgWBottom, imgHBottom; // dataBottom NULL if not asked for/failed
 } LoaderResult;
 
 static LoaderJob s_pendingJob;
@@ -734,6 +746,7 @@ static void free_loader_result(LoaderResult *r)
 {
     if (r->dataLeft)  { free(r->dataLeft);  r->dataLeft = NULL; }
     if (r->dataRight) { free(r->dataRight); r->dataRight = NULL; }
+    if (r->dataBottom) { free(r->dataBottom); r->dataBottom = NULL; }
 }
 
 static void loader_thread_main(void *arg)
@@ -765,6 +778,12 @@ static void loader_thread_main(void *arg)
         if (job.needRight) {
             decode_and_swizzle(job.pathRight, job.baseRight, &res.dataRight, &res.texWRight, &res.texHRight, &res.imgWRight, &res.imgHRight);
             // If this fails, res.dataRight stays NULL -- caller just falls back to a flat 2D preview.
+        }
+
+        if (job.needBottom) {
+            // Optional, like the right eye: if it fails the top preview still
+            // lands, and the bottom frame is simply requested again on its own.
+            decode_and_swizzle(job.pathBottom, 0, &res.dataBottom, &res.texWBottom, &res.texHBottom, &res.imgWBottom, &res.imgHBottom);
         }
 
         LightLock_Lock(&s_loaderLock);
@@ -808,7 +827,7 @@ static void loader_exit(void)
     }
 }
 
-static int loader_request_at(const char *pathLeft, long baseLeft, const char *pathRight, long baseRight)
+static int loader_request_at(const char *pathLeft, long baseLeft, const char *pathRight, long baseRight, const char *pathBottom)
 {
     LoaderJob job;
     snprintf(job.pathLeft, sizeof(job.pathLeft), "%s", pathLeft);
@@ -816,6 +835,8 @@ static int loader_request_at(const char *pathLeft, long baseLeft, const char *pa
     job.baseRight = baseRight;
     job.needRight = (pathRight != NULL);
     if (job.needRight) snprintf(job.pathRight, sizeof(job.pathRight), "%s", pathRight);
+    job.needBottom = (pathBottom != NULL);
+    if (job.needBottom) snprintf(job.pathBottom, sizeof(job.pathBottom), "%s", pathBottom);
 
     int id = ++s_nextJobId;
 
@@ -833,6 +854,9 @@ static int loader_request_at(const char *pathLeft, long baseLeft, const char *pa
             if (job.needRight) {
                 decode_and_swizzle(job.pathRight, job.baseRight, &res.dataRight, &res.texWRight, &res.texHRight, &res.imgWRight, &res.imgHRight);
             }
+            if (job.needBottom) {
+                decode_and_swizzle(job.pathBottom, 0, &res.dataBottom, &res.texWBottom, &res.texHBottom, &res.imgWBottom, &res.imgHBottom);
+            }
             s_result = res;
             s_resultValid = true;
             s_resultId = id;
@@ -845,7 +869,7 @@ static int loader_request_at(const char *pathLeft, long baseLeft, const char *pa
 // wants "load this path", with no offset to think about.
 static int loader_request(const char *pathLeft, const char *pathRight)
 {
-    return loader_request_at(pathLeft, 0, pathRight, 0);
+    return loader_request_at(pathLeft, 0, pathRight, 0, NULL);
 }
 
 // Both the top-screen preview and the bottom-screen capture poll this
@@ -895,7 +919,6 @@ typedef struct {
 } EyeTexture;
 
 static EyeTexture s_previewLeft, s_previewRight;
-static int s_previewLoadedPairIndex = -1;
 
 // True only once the top-screen preview actually matches the current
 // selection -- not merely requested. Without this gate, moving the
@@ -916,6 +939,22 @@ static int s_previewRequestedPairIndex = -1;
 // live preview), reusing the same loader/texture pipeline.
 static EyeTexture s_bottomCapture;
 static bool s_bottomCaptureRequested = false;
+
+// Which pair index s_bottomCapture currently holds (or -1). Lets the
+// lazy request below skip re-loading when the peek is released and
+// pressed again on the same screenshot.
+static int s_bottomCapturePairIndex = -1;
+
+// Which pair index the image currently sitting in s_bottomCapture belongs
+// to (-1 = none), and which pair the in-flight request is *for*. Kept
+// separate because the peek now leaves the previous screenshot's bottom
+// frame on screen while the next one loads (exactly like the top screen
+// does with its preview), so "what's displayed" and "what's selected"
+// can legitimately differ for a moment -- and the draw code needs to know
+// when they do, to show the loading spinner.
+static int s_bottomCaptureShownIndex = -1;
+static int s_bottomCaptureReqPairIndex = -1;
+
 
 static void free_eye_texture(EyeTexture *et)
 {
@@ -1132,6 +1171,12 @@ static Thumbnail s_thumbs[MAX_PAIRS];
 // Source size is stored as a second check, so a file replaced at the
 // same path with differently-sized content is also caught.
 #define THUMB_CACHE_PATH CONFIG_DIR "/thumbcache.bin"
+// Deliberately NOT tied to MAX_PAIRS. The cache file is rewritten whole on
+// every save, so its size is a direct cost: at 64 entries that's ~290KB, but
+// following MAX_PAIRS up to 256 would be ~1.1MB per save. Sixty-four covers
+// the newest screenshots -- the ones actually browsed -- and older entries
+// age out first-in-first-out.
+#define THUMB_CACHE_MAX 64
 #define THUMB_CACHE_MAGIC 0x43544843u // "CTHC"
 #define THUMB_CACHE_VERSION 1u
 #define THUMB_RGB_BYTES (THUMB_COLS * THUMB_ROWS * 3)
@@ -1143,7 +1188,7 @@ typedef struct {
     u8   rgb[THUMB_RGB_BYTES];
 } ThumbCacheEntry;
 
-static ThumbCacheEntry s_thumbCache[MAX_PAIRS];
+static ThumbCacheEntry s_thumbCache[THUMB_CACHE_MAX];
 static int  s_thumbCacheCount = 0;
 static bool s_thumbCacheLoaded = false;
 static bool s_thumbCacheDirty = false;
@@ -1171,7 +1216,7 @@ static void load_thumb_cache(void)
     }
 
     int count = (int)hdr[2];
-    if (count > MAX_PAIRS) count = MAX_PAIRS;
+    if (count > THUMB_CACHE_MAX) count = THUMB_CACHE_MAX;
     if (count < 0) count = 0;
 
     size_t got = fread(s_thumbCache, sizeof(ThumbCacheEntry), (size_t)count, f);
@@ -1225,14 +1270,14 @@ static void thumb_cache_store(const char *path, long base, u32 srcSize, const u8
         }
     }
     if (!slot) {
-        if (s_thumbCacheCount < MAX_PAIRS) {
+        if (s_thumbCacheCount < THUMB_CACHE_MAX) {
             slot = &s_thumbCache[s_thumbCacheCount++];
         } else {
             // Full: drop the oldest entry. Stale entries age out this
             // way without needing any explicit pruning pass.
             memmove(&s_thumbCache[0], &s_thumbCache[1],
-                    (size_t)(MAX_PAIRS - 1) * sizeof(ThumbCacheEntry));
-            slot = &s_thumbCache[MAX_PAIRS - 1];
+                    (size_t)(THUMB_CACHE_MAX - 1) * sizeof(ThumbCacheEntry));
+            slot = &s_thumbCache[THUMB_CACHE_MAX - 1];
         }
     }
 
@@ -1356,13 +1401,28 @@ static void remove_thumbnail_at(int idx)
 // Called every frame while browsing: kicks off a background load when
 // the selection changes (both eyes, if the pair is 3D-capable), and
 // applies the result once ready.
+// True on frames where the More screen is being peeked at (R held, 3DS mode).
+// Set each frame by the input handler; read when the next preview is requested.
+static bool s_peekActive = false;
+
 static void update_live_preview(void)
 {
     if (s_selected < 0 || s_selected >= s_visibleCount) return;
 
     int idx = s_visibleIndices[s_selected];
     if (idx != s_previewLoadedPairIndex && idx != s_previewRequestedPairIndex) {
-        s_previewRequestId = loader_request_at(item_top_path(idx), item_data_offset(idx), item_right_path(idx), 0);
+        // While peeking, fetch the bottom frame in the *same* job. Decoding
+        // can't overlap -- on an Old 3DS the loader shares the one CPU core
+        // with the main thread, so the two images are always decoded one
+        // after the other -- but landing them in one result means both screens
+        // switch in the same frame instead of the top going first and the
+        // bottom a few frames later. (The top waits for the bottom's decode;
+        // the bottom itself arrives no later than it did before.)
+        const char *bottomPath = NULL;
+        if (s_peekActive && !s_dsMode && idx >= 0 && idx < s_pairCount && s_pairs[idx].botPath[0]) {
+            bottomPath = s_pairs[idx].botPath;
+        }
+        s_previewRequestId = loader_request_at(item_top_path(idx), item_data_offset(idx), item_right_path(idx), 0, bottomPath);
         s_previewRequestedPairIndex = idx;
     }
 
@@ -1376,6 +1436,15 @@ static void update_live_preview(void)
         } else {
             free_eye_texture(&s_previewRight);
         }
+        if (result.dataBottom) {
+            // Applied in the same frame as the preview above. Marks this
+            // screenshot's bottom frame as handled so it isn't requested again.
+            apply_prepared_texture(result.dataBottom, result.texWBottom, result.texHBottom,
+                                    result.imgWBottom, result.imgHBottom, &s_bottomCapture);
+            s_bottomCaptureRequested = false;
+            s_bottomCapturePairIndex = s_previewRequestedPairIndex;
+            s_bottomCaptureShownIndex = s_bottomCapture.valid ? s_previewRequestedPairIndex : -1;
+        }
         s_previewLoadedPairIndex = s_previewRequestedPairIndex;
     }
 }
@@ -1383,18 +1452,23 @@ static void update_live_preview(void)
 // Kicks off a background load of the bottom-screen capture for the
 // given pair (if it has one) -- called once when entering the detail
 // view, not continuously.
-// Which pair index s_bottomCapture currently holds (or -1). Lets the
-// lazy request below skip re-loading when the peek is released and
-// pressed again on the same screenshot.
-static int s_bottomCapturePairIndex = -1;
 
-static void request_bottom_capture(const ScreenshotPair *p)
+static void request_bottom_capture(const ScreenshotPair *p, int pairIdx)
 {
-    free_eye_texture(&s_bottomCapture);
     s_bottomCaptureRequested = false;
     if (p && p->botPath[0]) {
+        // Deliberately NOT freeing the current image here: the previous
+        // frame stays up until the new one lands, and apply_prepared_texture
+        // swaps it in at that moment.
         s_bottomCaptureRequestId = loader_request(p->botPath, NULL);
+        s_bottomCaptureReqPairIndex = pairIdx;
         s_bottomCaptureRequested = true;
+    } else {
+        // Nothing is coming for this screenshot (no bottom capture, or a
+        // merged image), so a stale frame must not linger as if it were
+        // this one's.
+        free_eye_texture(&s_bottomCapture);
+        s_bottomCaptureShownIndex = -1;
     }
 }
 
@@ -1414,6 +1488,15 @@ static void invalidate_bottom_capture(void)
     free_eye_texture(&s_bottomCapture);
     s_bottomCaptureRequested = false;
     s_bottomCapturePairIndex = -1;
+    s_bottomCaptureShownIndex = -1;
+}
+
+// Softer than invalidate: the selection changed *while peeking*, so keep
+// the previous frame visible (with the loading spinner) rather than
+// blanking it, but make sure the new screenshot's frame gets requested.
+static void stale_bottom_capture(void)
+{
+    s_bottomCapturePairIndex = -1;
 }
 
 // Loads the bottom capture for the current pair, if it isn't already
@@ -1423,11 +1506,39 @@ static void maybe_request_bottom_capture(void)
     if (s_dsMode) return; // DS captures have no companion bottom frame
     if (s_selected < 0 || s_selected >= s_visibleCount) return;
 
+    // Serialise with the top-screen preview. The loader has a single
+    // pending slot where a newer request replaces an older one that
+    // hasn't started yet, and a single result slot -- so queueing this
+    // alongside a preview load that's still in flight (as happens when
+    // flipping through screenshots with R held) risks one clobbering
+    // the other. Waiting for the preview guarantees at most one job is
+    // ever outstanding.
+    if (!current_preview_ready()) return;
+
     int idx = s_visibleIndices[s_selected];
-    if (idx == s_bottomCapturePairIndex) return; // already loaded or loading
+    if (idx == s_bottomCapturePairIndex) {
+        // Already handled this selection. The one thing worth re-checking:
+        // a frame for a *different* screenshot landing late on a selection
+        // that has no bottom capture of its own to replace it -- left alone
+        // it would sit there looking like this screenshot's. (Only that
+        // case, deliberately: re-requesting a capture that failed to load
+        // every frame would just hammer the loader.)
+        if (idx >= 0 && idx < s_pairCount && s_bottomCapture.valid &&
+            s_bottomCaptureShownIndex != idx && !s_pairs[idx].botPath[0]) {
+            free_eye_texture(&s_bottomCapture);
+            s_bottomCaptureShownIndex = -1;
+        }
+        return;
+    }
 
     if (idx >= 0 && idx < s_pairCount) {
-        request_bottom_capture(&s_pairs[idx]);
+        // Navigated away and straight back before the other one landed:
+        // the right image is still on screen, nothing to load.
+        if (s_bottomCapture.valid && s_bottomCaptureShownIndex == idx) {
+            s_bottomCapturePairIndex = idx;
+            return;
+        }
+        request_bottom_capture(&s_pairs[idx], idx);
         s_bottomCapturePairIndex = idx;
     }
 }
@@ -1442,7 +1553,9 @@ static void poll_bottom_capture(void)
         apply_prepared_texture(result.dataLeft, result.texWLeft, result.texHLeft,
                                 result.imgWLeft, result.imgHLeft, &s_bottomCapture);
         if (result.dataRight) free(result.dataRight); // shouldn't happen (we pass pathRight=NULL), but safe
+        if (result.dataBottom) free(result.dataBottom); // likewise
         s_bottomCaptureRequested = false;
+        s_bottomCaptureShownIndex = s_bottomCapture.valid ? s_bottomCaptureReqPairIndex : -1;
     }
 }
 
@@ -3199,6 +3312,39 @@ static void draw_ds_tabs(void)
     draw_separator(TAB_HAIRLINE_Y);
 }
 
+// Thumbnails, visible indices and batch flags are all indexed by *item* index,
+// and in DS mode that index runs up to MAX_DS_SHOTS. If MAX_PAIRS were ever
+// smaller than that, those arrays would be written past their end -- which is
+// exactly what happened with a limit of 64 and more than 64 extracted DS
+// screenshots. Fail the build instead of corrupting memory.
+typedef char comet_assert_max_pairs_covers_ds_shots[(MAX_PAIRS >= MAX_DS_SHOTS) ? 1 : -1];
+
+// Each built thumbnail holds an 8KB texture, and nothing used to release them
+// while scrolling -- so memory grew with how far you'd scrolled, and a bigger
+// library limit would have meant a bigger worst case. Now only the rows around
+// the viewport keep theirs (a few screens' slack each way, so small scrolls
+// stay instant); everything further away is released and simply rebuilt if
+// you scroll back (usually from the on-disk cache). Runs only when the scroll
+// position changes, not every frame.
+#define THUMB_KEEP_ROWS 3
+static int s_lastEvictRow = -1;
+static void evict_far_thumbnails(int startRow, int visRows)
+{
+    if (startRow == s_lastEvictRow) return;
+    s_lastEvictRow = startRow;
+
+    int firstKeep = (startRow - THUMB_KEEP_ROWS) * GRID_COLS;
+    int endKeep   = (startRow + visRows + THUMB_KEEP_ROWS) * GRID_COLS; // exclusive
+    for (int vp = 0; vp < s_visibleCount; vp++) {
+        if (vp >= firstKeep && vp < endKeep) continue;
+        Thumbnail *t = &s_thumbs[s_visibleIndices[vp]];
+        if (t->attempted) {
+            free_eye_texture(&t->tex);
+            t->attempted = false;
+        }
+    }
+}
+
 static void draw_grid(void)
 {
     // No subtitle row here -- the grid is tight enough (4 rows of 40px
@@ -3239,6 +3385,8 @@ static void draw_grid(void)
     int startRow = compute_grid_start_row();
     int totalRows = (s_visibleCount + GRID_COLS - 1) / GRID_COLS;
     int visRows = GRID_ROWS_CUR;
+
+    evict_far_thumbnails(startRow, visRows);
 
     // Thumbnail building happens here, on the main thread, so each one
     // costs real frame time. This used to be capped at exactly one per
@@ -3479,6 +3627,14 @@ static bool detail_menu_hit_test(int touchX, int touchY, int *outIndex)
 static void draw_bottom_capture(void)
 {
     ScreenshotPair *p = s_dsMode ? NULL : current_pair();
+    int sel = (s_selected >= 0 && s_selected < s_visibleCount) ? s_visibleIndices[s_selected] : -1;
+    bool wantsBottom = p && p->botPath[0];
+
+    // "Loading" = what's on screen isn't yet the current selection's
+    // frame: either the new top preview hasn't landed, or this screenshot's
+    // bottom frame hasn't. Same idea as the top screen's own indicator.
+    bool loading = !current_preview_ready() || (wantsBottom && s_bottomCaptureShownIndex != sel);
+
     if (s_bottomCapture.valid) {
         float w = 320, h = 240;
         float imgAspect = (float)s_bottomCapture.subtex.width / (float)s_bottomCapture.subtex.height;
@@ -3490,6 +3646,13 @@ static void draw_bottom_capture(void)
         float scaleX = drawW / s_bottomCapture.subtex.width;
         float scaleY = drawH / s_bottomCapture.subtex.height;
         C2D_DrawImageAt(s_bottomCapture.image, drawX, drawY, 0.0f, NULL, scaleX, scaleY);
+
+        // The previous screenshot's frame stays up while the next one
+        // loads, with the small corner spinner the top screen uses
+        // (18px in from the right, 20 down) instead of blanking the view.
+        if (loading) draw_spinner_sized(302, 20, 6, 3.5f);
+    } else if (loading) {
+        draw_spinner(160, 120, 16); // nothing on screen yet to keep (first peek)
     } else if (p && !p->botPath[0]) {
         draw_centered_text(0, 108, 320, 24, TEXT_12, COLOR_DIM, "No bottom screen capture available");
     } else {
@@ -4028,6 +4191,7 @@ bool ui_frame(void)
     }
 
     AppState stateBefore = s_state;
+    s_peekActive = false; // the More screen sets this below when R is held
 
     // Whether an unconsumed tap is heading into the switch below, to
     // be handled by state-specific code (a grid cell, a DS tab, a
@@ -4234,10 +4398,17 @@ bool ui_frame(void)
         // "Show bottom" is a 3DS-only peek -- DS captures have no
         // companion bottom frame, and R there is free for other use.
         bool rHeld = !s_dsMode && ((held & KEY_R) != 0 || s_touchHoldingShowBottom);
+        s_peekActive = rHeld;
         // Load on demand, the first frame the peek is actually engaged
         // -- rather than speculatively on every navigation.
-        if (rHeld) maybe_request_bottom_capture();
         poll_bottom_capture();
+        if (rHeld) maybe_request_bottom_capture(); // after the poll, so a late leftover is cleared the same frame
+        // R was let go while a previous screenshot's frame was still up:
+        // drop it, so the next press starts clean instead of flashing it.
+        if (!rHeld && s_bottomCapture.valid) {
+            int selNow = (s_selected >= 0 && s_selected < s_visibleCount) ? s_visibleIndices[s_selected] : -1;
+            if (s_bottomCaptureShownIndex != selNow) invalidate_bottom_capture();
+        }
 
         // Hidden L+R: duplicate this screenshot. Checked before the
         // single-L widescreen toggle so holding both doesn't also flip
@@ -4254,7 +4425,7 @@ bool ui_frame(void)
         }
 
         // DS only: L alone toggles the widescreen stretch.
-        if (s_dsMode && (kDown & KEY_L) && !(held & KEY_R)) {
+        if (s_dsMode && (kDown & KEY_L) && !(held & KEY_R) && current_preview_ready()) {
             if (s_selected >= 0 && s_selected < s_visibleCount) {
                 int idx = s_visibleIndices[s_selected];
                 if (s_dsTab == DS_TAB_SD_CARD) {
@@ -4274,43 +4445,59 @@ bool ui_frame(void)
             break;
         }
 
+        // Left/Right step through the gallery without leaving this
+        // screen. Clamped rather than wrapping, matching how the grid
+        // itself behaves at its edges.
+        //
+        // Deliberately outside the !rHeld block below, so it also works
+        // while R is held to peek at the bottom screen -- flip through
+        // a run of screenshots comparing their bottom screens without
+        // letting go. (Everything else, including B and the menu, stays
+        // disabled during the peek.)
+        //
+        // Gated on the current preview having actually finished
+        // loading: without it, holding a direction races ahead of the
+        // loader and the screen ends up describing a different
+        // screenshot than the top screen is showing -- the same
+        // mismatch that could otherwise lead to deleting or exporting
+        // the wrong file. Same guard used for entering this screen.
+        if ((kDown & (KEY_LEFT | KEY_RIGHT)) && current_preview_ready()) {
+            int next = s_selected + ((kDown & KEY_RIGHT) ? 1 : -1);
+            if (next >= 0 && next < s_visibleCount && next != s_selected) {
+                s_selected = next;
+                audio_play(SFX_BUTTON_QUIET);
+                // Peeking: leave the previous bottom frame up (with the
+                // spinner) until the new one lands. Not peeking: drop it,
+                // so the next R press can't briefly flash the previous
+                // screenshot's frame. Either way the new one loads on
+                // demand once the new top preview has landed.
+                if (rHeld) stale_bottom_capture();
+                else       invalidate_bottom_capture();
+            }
+        }
+
         if (!rHeld) {
             int menuCount = detail_menu_item_count();
+            // Menu shape can differ between screenshots (Merge only
+            // appears when there's a bottom capture). Clamped here, every
+            // frame, rather than at the moment of navigation: at that
+            // moment the menu still describes the *previous* screenshot,
+            // so a clamp there used the wrong item's option count and
+            // could leave the cursor past the end of the new menu.
+            if (s_detailMenuSelection >= menuCount) s_detailMenuSelection = menuCount - 1;
             if (kDown & KEY_DOWN) s_detailMenuSelection = (s_detailMenuSelection + 1) % menuCount;
             if (kDown & KEY_UP)   s_detailMenuSelection = (s_detailMenuSelection + menuCount - 1) % menuCount;
             if (kDown & KEY_B) s_state = APP_BROWSE;
 
-            // Left/Right step through the gallery without leaving this
-            // screen. Clamped rather than wrapping, matching how the
-            // grid itself behaves at its edges.
-            //
-            // Gated on the current preview having actually finished
-            // loading: without it, holding a direction races ahead of
-            // the loader and the bottom screen ends up describing a
-            // different screenshot than the top screen is showing --
-            // the same mismatch that could otherwise lead to deleting
-            // or exporting the wrong file. Same guard used for
-            // entering this screen in the first place.
-            if ((kDown & (KEY_LEFT | KEY_RIGHT)) && current_preview_ready()) {
-                int next = s_selected + ((kDown & KEY_RIGHT) ? 1 : -1);
-                if (next >= 0 && next < s_visibleCount && next != s_selected) {
-                    s_selected = next;
-                    audio_play(SFX_BUTTON_QUIET);
-                    // Menu shape can differ between screenshots (Merge
-                    // only appears when there's a bottom capture), so
-                    // re-clamp rather than leave the cursor past the end.
-                    int newCount = detail_menu_item_count();
-                    if (s_detailMenuSelection >= newCount) s_detailMenuSelection = newCount - 1;
-                    // Invalidate only -- without this, R would still
-                    // peek at the previously-selected screenshot's
-                    // bottom frame. Loaded on demand when R is held.
-                    invalidate_bottom_capture();
-                }
-            }
-
+            // Actions only apply to what's actually on the top screen.
+            // After Left/Right, s_selected moves instantly but the top
+            // preview (and this menu's info) lag behind until the load
+            // finishes -- pressing A in that window would have acted on
+            // a screenshot the user hadn't seen yet.
+            bool actionable = current_preview_ready();
             int chosen = -1;
-            if (kDown & KEY_A) chosen = s_detailMenuSelection;
-            if (tapped) {
+            if (actionable && (kDown & KEY_A)) chosen = s_detailMenuSelection;
+            if (actionable && tapped) {
                 int idx;
                 if (detail_menu_hit_test(touch.px, touch.py, &idx)) {
                     s_detailMenuSelection = idx;

@@ -1,5 +1,39 @@
 # Changelog
 
+## v3.4
+
+Fixes for large screenshot libraries, and a nicer way to flip through
+bottom screens.
+
+### New
+
+- While holding R to see the bottom screen, Left and Right now move to
+  the previous or next screenshot, so you can flip through a run of
+  them without letting go. The previous bottom screen stays up with a
+  small loading spinner in the corner while the next one loads, the
+  same way the top screen behaves, and both screens switch to the new
+  screenshot at the same moment
+
+### Fixed
+
+- Comet only listed the oldest 64 screenshots in a folder, so with more
+  than that your newest ones never appeared. It now shows your newest
+  2048. This also covers Nexus3DS date folders, where only the first 64
+  folders were ever read
+- The DS widescreen stretch no longer briefly shows on the previous
+  screenshot while the next one is loading
+- Fixed a bug that could cause glitches or crashes once more than 64 DS
+  screenshots had been extracted to the SD card
+- On the More screen, pressing A or tapping an option right after
+  switching screenshots now waits until the new screenshot has finished
+  loading, so it can't act on one that isn't on the top screen yet
+
+### Changed
+
+- To make room for the larger limit, thumbnails far from the screen are
+  now released while you scroll and rebuilt when you scroll back, so a
+  big library doesn't use more memory the further you browse
+
 ## v3.3
 
 A few small quality-of-life changes, plus some behind-the-scenes

@@ -17,49 +17,63 @@ static int pair_cmp_newest_first(const void *a, const void *b)
     return strcmp(pb->timestamp, pa->timestamp);
 }
 
-// Scans one directory in a SINGLE pass.
+// Scans the screenshot folder(s) in a single enumeration per directory.
 //
-// The previous version enumerated each directory three times (once for
-// _top.bmp, once for _cmb.bmp, once looking for subfolders) and issued
-// two stat() calls per screenshot to test for its _top_right/_bot
-// companions, plus one stat() per entry just to ask "is this a
-// directory?". For a flat 88-screenshot folder that worked out to
-// roughly 440 filesystem lookups per scan -- and a scan runs on every
-// single delete, which is exactly why deleting had become slow.
-//
-// Now: one enumeration collects every filename into memory, and all
-// the companion questions are answered by string comparison against
-// that list. Zero extra I/O.
+// Two properties matter here, and the first version of this got the
+// second one wrong:
+//   1. Companion files (_top_right / _bot) are answered from an in-memory
+//      sorted list, not one stat() each -- that's what made the original
+//      scan slow on every delete.
+//   2. When there are more screenshots than the caller has room for, keep
+//      the NEWEST, not whichever happened to be listed first. Directory
+//      order on FAT is oldest-first, and the old code stopped at the cap in
+//      that order -- so past the limit the newest screenshots silently
+//      never appeared, which is exactly what a user with years of
+//      screenshots saw ("only my old ones show up").
+// No fixed-size name buffers either: the lists grow as needed, so neither
+// a big folder nor a lot of Nexus3DS date folders can be silently cut off.
 
-#define MAX_DIR_ENTRIES 512
-#define MAX_ENTRY_NAME  128
+#define MAX_ENTRY_NAME 128
+#define NAMELIST_HARD_MAX 20000   // sanity ceiling (~2.5MB), not a feature limit
 
 typedef struct {
     char (*names)[MAX_ENTRY_NAME];
-    int   count;
+    int   count, cap;
 } NameList;
 
-static int name_cmp(const void *a, const void *b)
+static int name_cmp(const void *a, const void *b)      { return strcmp((const char *)a, (const char *)b); }
+static int name_cmp_desc(const void *a, const void *b) { return strcmp((const char *)b, (const char *)a); }
+
+static bool namelist_push(NameList *l, const char *s)
 {
-    return strcmp((const char *)a, (const char *)b);
+    if (l->count >= NAMELIST_HARD_MAX) return false;
+    if (l->count == l->cap) {
+        int ncap = l->cap ? l->cap * 2 : 256;
+        void *np = realloc(l->names, (size_t)ncap * MAX_ENTRY_NAME);
+        if (!np) return false;
+        l->names = np;
+        l->cap = ncap;
+    }
+    size_t n = strlen(s);
+    if (n >= MAX_ENTRY_NAME) n = MAX_ENTRY_NAME - 1;
+    memcpy(l->names[l->count], s, n);
+    l->names[l->count][n] = '\0';
+    l->count++;
+    return true;
 }
 
-// Both lists are static rather than stack-allocated: at 512 * 128 =
-// 64KB each they'd blow the 3DS's comparatively small stack, and only
-// one scan ever runs at a time.
-static char s_entryNames[MAX_DIR_ENTRIES][MAX_ENTRY_NAME];
-static char s_subDirNames[64][MAX_ENTRY_NAME];
+static void namelist_free(NameList *l)
+{
+    free(l->names);
+    l->names = NULL;
+    l->count = l->cap = 0;
+}
 
 // Reads every entry in one pass, splitting files from subdirectories.
-// Uses dirent's d_type where the filesystem reports it (FAT does),
-// falling back to stat() only for entries it reports as unknown --
-// which is what removes the per-entry stat() call the subfolder scan
-// used to make unconditionally.
-static void enumerate_dir(const char *dirPath, int *outFileCount, int *outDirCount)
+// dirent's d_type is used where the filesystem reports it (FAT does),
+// falling back to stat() only for entries it calls unknown.
+static void enumerate_dir(const char *dirPath, NameList *files, NameList *dirs)
 {
-    *outFileCount = 0;
-    *outDirCount  = 0;
-
     DIR *d = opendir(dirPath);
     if (!d) return;
 
@@ -79,76 +93,112 @@ static void enumerate_dir(const char *dirPath, int *outFileCount, int *outDirCou
             isDir = S_ISDIR(st.st_mode);
         }
 
-        if (isDir) {
-            if (*outDirCount < 64) {
-                snprintf(s_subDirNames[*outDirCount], MAX_ENTRY_NAME, "%s", ent->d_name);
-                (*outDirCount)++;
-            }
-        } else {
-            if (*outFileCount < MAX_DIR_ENTRIES) {
-                snprintf(s_entryNames[*outFileCount], MAX_ENTRY_NAME, "%s", ent->d_name);
-                (*outFileCount)++;
-            }
-        }
+        if (isDir) { if (dirs) namelist_push(dirs, ent->d_name); }
+        else       { namelist_push(files, ent->d_name); }
     }
     closedir(d);
 }
 
-// Sorted list + bsearch, so companion lookups stay fast even with a
-// few hundred files rather than degrading to a linear scan each time.
-static bool name_present(const char *needle, int fileCount)
+// Sorted ascending, so bsearch works for the companion lookups.
+static bool name_present(const char *needle, const NameList *files)
 {
-    return bsearch(needle, s_entryNames, fileCount, MAX_ENTRY_NAME, name_cmp) != NULL;
+    return bsearch(needle, files->names, (size_t)files->count, MAX_ENTRY_NAME, name_cmp) != NULL;
 }
 
-// Builds pairs from an already-enumerated, already-sorted name list.
-static int build_pairs_from_names(const char *dirPath, int fileCount,
-                                   ScreenshotPair *out, int max, int startCount)
+static void fill_pair(ScreenshotPair *p, const char *dirPath, const char *name,
+                      const char *ts, bool isCmb, const NameList *files)
 {
-    int count = startCount;
+    memset(p, 0, sizeof(*p));
+    p->isCombined = isCmb;
+    snprintf(p->timestamp, sizeof(p->timestamp), "%s", ts);
+    snprintf(p->topPath, sizeof(p->topPath), "%s/%s", dirPath, name);
+
+    // Combined images are self-contained -- no companions to find.
+    if (isCmb) return;
+
+    char candidate[MAX_ENTRY_NAME];
+    snprintf(candidate, sizeof(candidate), "%s_top_right.bmp", ts);
+    if (name_present(candidate, files)) {
+        snprintf(p->topRightPath, sizeof(p->topRightPath), "%s/%s", dirPath, candidate);
+        p->has3D = true;
+    }
+    snprintf(candidate, sizeof(candidate), "%s_bot.bmp", ts);
+    if (name_present(candidate, files)) {
+        snprintf(p->botPath, sizeof(p->botPath), "%s/%s", dirPath, candidate);
+    }
+}
+
+static int oldest_index(const ScreenshotPair *out, int count)
+{
+    int m = 0;
+    for (int i = 1; i < count; i++) {
+        if (strcmp(out[i].timestamp, out[m].timestamp) < 0) m = i;
+    }
+    return m;
+}
+
+// Builds pairs from one directory's (sorted) file list, newest first, into
+// `out` (capacity `max`, `count` already filled). Once full, a candidate
+// only gets in by displacing the oldest one held -- and because this
+// directory is walked newest-first, the first candidate that isn't newer
+// than the oldest held means everything left here is older too, so it stops.
+static int build_pairs_from_names(const char *dirPath, const NameList *files,
+                                  ScreenshotPair *out, int max, int count)
+{
     static const char TOP_SUFFIX[] = "_top.bmp";
     static const char CMB_SUFFIX[] = "_cmb.bmp";
     const size_t topLen = sizeof(TOP_SUFFIX) - 1;
     const size_t cmbLen = sizeof(CMB_SUFFIX) - 1;
 
-    for (int i = 0; i < fileCount && count < max; i++) {
-        const char *name = s_entryNames[i];
+    for (int i = files->count - 1; i >= 0; i--) {
+        const char *name = files->names[i];
         size_t nameLen = strlen(name);
 
         bool isTop = nameLen > topLen && strcmp(name + nameLen - topLen, TOP_SUFFIX) == 0;
         bool isCmb = nameLen > cmbLen && strcmp(name + nameLen - cmbLen, CMB_SUFFIX) == 0;
         if (!isTop && !isCmb) continue;
 
-        ScreenshotPair *p = &out[count];
-        memset(p, 0, sizeof(*p));
-        p->isCombined = isCmb;
-
+        char ts[MAX_ENTRY_NAME];
         size_t tsLen = nameLen - (isCmb ? cmbLen : topLen);
-        if (tsLen >= sizeof(p->timestamp)) tsLen = sizeof(p->timestamp) - 1;
-        memcpy(p->timestamp, name, tsLen);
-        p->timestamp[tsLen] = '\0';
+        memcpy(ts, name, tsLen);
+        ts[tsLen] = '\0';
 
-        snprintf(p->topPath, sizeof(p->topPath), "%s/%s", dirPath, name);
-
-        // Combined images are self-contained -- no companions to find.
-        if (!isCmb) {
-            char candidate[MAX_ENTRY_NAME];
-
-            snprintf(candidate, sizeof(candidate), "%s_top_right.bmp", p->timestamp);
-            if (name_present(candidate, fileCount)) {
-                snprintf(p->topRightPath, sizeof(p->topRightPath), "%s/%s", dirPath, candidate);
-                p->has3D = true;
-            }
-
-            snprintf(candidate, sizeof(candidate), "%s_bot.bmp", p->timestamp);
-            if (name_present(candidate, fileCount)) {
-                snprintf(p->botPath, sizeof(p->botPath), "%s/%s", dirPath, candidate);
-            }
+        if (count < max) {
+            fill_pair(&out[count++], dirPath, name, ts, isCmb, files);
+        } else {
+            int victim = oldest_index(out, count);
+            if (strcmp(ts, out[victim].timestamp) <= 0) break; // the rest of this folder is older still
+            fill_pair(&out[victim], dirPath, name, ts, isCmb, files);
         }
-
-        count++;
     }
     return count;
+}
+
+// Sorting the records themselves moves ~n log n of them, 834 bytes apiece --
+// about 19MB of copying at 2048 entries, on every scan (boot, every delete).
+// Sort a plain index array instead and move each record exactly once.
+static const ScreenshotPair *s_sortBase;
+static int idx_cmp_newest_first(const void *a, const void *b)
+{
+    return strcmp(s_sortBase[*(const int *)b].timestamp, s_sortBase[*(const int *)a].timestamp);
+}
+
+static void sort_newest_first(ScreenshotPair *out, int count)
+{
+    if (count < 2) return;
+    int *order = (int *)malloc((size_t)count * sizeof(int));
+    ScreenshotPair *tmp = (ScreenshotPair *)malloc((size_t)count * sizeof(ScreenshotPair));
+    if (!order || !tmp) { // low on memory: the slow way still works
+        free(order); free(tmp);
+        qsort(out, (size_t)count, sizeof(ScreenshotPair), pair_cmp_newest_first);
+        return;
+    }
+    for (int i = 0; i < count; i++) order[i] = i;
+    s_sortBase = out;
+    qsort(order, (size_t)count, sizeof(int), idx_cmp_newest_first);
+    for (int i = 0; i < count; i++) tmp[i] = out[order[i]];
+    memcpy(out, tmp, (size_t)count * sizeof(ScreenshotPair));
+    free(order); free(tmp);
 }
 
 int fs_scan_screenshot_pairs(ScreenshotPair *out, int max)
@@ -156,46 +206,36 @@ int fs_scan_screenshot_pairs(ScreenshotPair *out, int max)
     char rootPath[300];
     snprintf(rootPath, sizeof(rootPath), "%s%s", SD_ROOT, SCREENSHOTS_DIR);
 
-    int fileCount = 0, dirCount = 0;
-    enumerate_dir(rootPath, &fileCount, &dirCount);
+    NameList files = {0}, dirs = {0};
+    enumerate_dir(rootPath, &files, &dirs);
+    qsort(files.names, (size_t)files.count, MAX_ENTRY_NAME, name_cmp);
+    int count = build_pairs_from_names(rootPath, &files, out, max, 0);
+    namelist_free(&files);
 
-    // Copy the subdirectory names out before the buffer gets reused by
-    // the per-subfolder enumerations below. Fixed-size copy rather than
-    // snprintf("%s"): GCC can't bound a 2D-array row access through a
-    // %s and assumes the whole array could be read, which is what
-    // produced a spurious truncation warning here.
-    char subDirs[64][MAX_ENTRY_NAME];
-    int subDirCount = dirCount;
-    for (int i = 0; i < subDirCount; i++) {
-        memcpy(subDirs[i], s_subDirNames[i], MAX_ENTRY_NAME);
-        subDirs[i][MAX_ENTRY_NAME - 1] = '\0';
-    }
-
-    qsort(s_entryNames, fileCount, MAX_ENTRY_NAME, name_cmp);
-    int count = build_pairs_from_names(rootPath, fileCount, out, max, 0);
-
-    // One level of subdirectories -- Nexus3DS's optional "save
-    // screenshots in date folders" setting puts each day's captures
-    // in their own folder directly under the root. Not validated as
-    // looking like a date: any subfolder found gets scanned, so this
-    // doesn't depend on one exact naming scheme.
-    for (int i = 0; i < subDirCount && count < max; i++) {
-        // Via a plain 1D buffer, for the same GCC-can't-bound-a-2D-row
-        // reason as the copy above.
+    // One level of subdirectories -- Nexus3DS's optional "save screenshots
+    // in date folders" setting puts each day's captures in their own folder
+    // directly under the root. Not validated as looking like a date: any
+    // subfolder found gets scanned. Newest-named first, which usually means
+    // the ones that can still displace something get seen before the ones
+    // that can't.
+    qsort(dirs.names, (size_t)dirs.count, MAX_ENTRY_NAME, name_cmp_desc);
+    for (int i = 0; i < dirs.count; i++) {
         char subName[MAX_ENTRY_NAME];
-        memcpy(subName, subDirs[i], MAX_ENTRY_NAME);
+        memcpy(subName, dirs.names[i], MAX_ENTRY_NAME);
         subName[MAX_ENTRY_NAME - 1] = '\0';
 
         char subPath[600];
         snprintf(subPath, sizeof(subPath), "%s/%s", rootPath, subName);
 
-        int subFileCount = 0, subDirIgnored = 0;
-        enumerate_dir(subPath, &subFileCount, &subDirIgnored); // only one level deep
-        qsort(s_entryNames, subFileCount, MAX_ENTRY_NAME, name_cmp);
-        count = build_pairs_from_names(subPath, subFileCount, out, max, count);
+        NameList subFiles = {0};
+        enumerate_dir(subPath, &subFiles, NULL); // only one level deep
+        qsort(subFiles.names, (size_t)subFiles.count, MAX_ENTRY_NAME, name_cmp);
+        count = build_pairs_from_names(subPath, &subFiles, out, max, count);
+        namelist_free(&subFiles);
     }
+    namelist_free(&dirs);
 
-    qsort(out, count, sizeof(ScreenshotPair), pair_cmp_newest_first);
+    sort_newest_first(out, count);
     return count;
 }
 

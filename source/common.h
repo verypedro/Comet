@@ -25,7 +25,13 @@
 #define JPEG_QUALITY          90
 
 // Max screenshot pairs we'll list in the picker at once
-#define MAX_PAIRS             64
+// How many screenshots Comet keeps in its list at once. When a folder holds
+// more than this, the NEWEST are kept. (It used to be 64 and kept the oldest,
+// so anyone with a long screenshot history never saw their recent ones.)
+// Costs ~0.8KB of RAM per entry, and nothing else scales with it: thumbnails
+// are windowed around what's on screen, the thumbnail cache has its own fixed
+// size, and the scan sorts indices rather than whole records.
+#define MAX_PAIRS             2048
 
 // One discovered "photo" -- a left-eye bmp, optionally paired with a
 // right-eye bmp for stereoscopic 3D, plus the bottom-screen capture.

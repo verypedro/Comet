@@ -973,3 +973,176 @@ behaviour known not to freeze.
 Existing users' widescreen marks and thumbnail cache won't carry over
 automatically from the old top-level location -- both harmless one-time
 resets. The DS-intro popup will also show once more after updating.
+
+
+## Holding R no longer freezes navigation in the More screen
+
+Left/Right sat inside the `if (!rHeld)` block, so flipping between
+screenshots was deliberately disabled while peeking at the bottom screen.
+It now runs outside that block (B and the menu stay disabled during the
+peek), so a run of screenshots can be compared without letting go of R.
+
+Two things had to change with it:
+
+- **The bottom-capture load now waits for the top preview.** The loader
+  has a single pending slot where a newer request replaces an older one
+  that hasn't started, plus a single result slot. Queueing the bottom
+  capture alongside a preview still in flight can let one clobber the
+  other. Modelled (not measured on hardware): with a prompt worker both
+  orderings work; if the worker wakes more than one frame late, an
+  immediate bottom request overwrites the pending preview and the top
+  screen never loads. Waiting for `current_preview_ready()` means at most
+  one job is ever outstanding. (A first version of that model had a bug in
+  how the worker resumed after a job; it was corrected before drawing any
+  conclusion.)
+- **The peek shows the spinner until the new top preview is up**, rather
+  than announcing "no bottom capture" about a screenshot that isn't on the
+  top screen yet.
+
+Also changed while in this block:
+
+- **A / touch actions now require `current_preview_ready()`.** After
+  Left/Right, `s_selected` moves instantly while the top preview and the
+  info panel lag behind until the load finishes; A pressed in that window
+  would have acted on a screenshot the user hadn't seen. This closes a gap
+  left by the earlier fix that only drove the *display* from the loaded
+  index.
+- **The menu-cursor clamp moved to every frame.** At the moment of
+  navigation the menu still describes the previous screenshot, so the old
+  clamp used the wrong item's option count.
+
+
+## Peek keeps the previous bottom frame while the next one loads
+
+Navigating with Left/Right while holding R used to free the bottom image
+immediately, so the peek went blank with a large centre spinner. It now
+behaves like the top screen: the previous frame stays up, with the small
+corner spinner (18px in from the right, 20 down), until the new frame lands.
+
+To make that safe, `s_bottomCaptureShownIndex` records which screenshot the
+image on screen belongs to and `s_bottomCaptureReqPairIndex` which one an
+in-flight request is for, so the draw code can tell "what's displayed" from
+"what's selected". Rules worth knowing:
+
+- Navigating *without* R held still frees the image, so the next press can't
+  flash the previous screenshot's frame. Releasing R while a mismatched frame
+  is up also drops it.
+- If the new selection has no bottom capture (or is a merged image), the
+  stale frame is freed rather than left looking like it belongs to it.
+- Checking the logic as a state model turned up one hole: a frame for
+  screenshot 3 landing *after* the user had moved back to a screenshot with no
+  bottom capture would have stayed on screen, unflagged, as if it were that
+  one's. The serial loader makes that ordering unlikely, but the re-check that
+  frees a mismatched leftover (run after the poll, so it clears the same
+  frame) removes the case outright.
+
+## Scan limit: Comet showed the OLDEST 64 screenshots
+
+Reported on GBATemp: "it only reads my screenshots from before 2023 and the
+new ones are not showing". Nothing in Comet is date-based. The scanner held
+at most `MAX_PAIRS` (64) screenshots and stopped at that cap while walking
+the folder in sorted *ascending* order, so past 64 it kept the oldest 64 and
+never reached the rest. Reproduced with the real scanner before changing
+anything: 100 screenshots from 2021 plus 20 from 2025 returned 64 from 2021
+and none from 2025. (The reporter has screenshots from 2021-2023 and none
+from 2024; that gap is irrelevant -- 2023 is simply his newest year, and those
+are the ones being cut.)
+
+The cap wasn't the only place the newest could vanish. Others, all fixed:
+- The file list was cut at 512 names *before* sorting, in directory order,
+  which on FAT is oldest-first -- so a big folder lost its newest files.
+- Only 64 Nexus3DS date folders were scanned, again in directory order, so
+  with more than 64 days of screenshots the newest folders were dropped.
+
+Now: names are collected into lists that grow as needed (a sanity ceiling of
+20,000 entries, not a feature limit); each folder is walked newest-first; and
+once the output is full a candidate only gets in by displacing the oldest one
+held, with an early stop as soon as a folder's remaining entries are all
+older. `MAX_PAIRS` was first raised to 256 and then to 2048 -- see the next
+section for why that needed more than changing the number.
+
+Verified against the real compiled scanner with independently computed
+expectations: the reported scenario (all 20 new screenshots now present),
+400 flat screenshots, 120 date folders mixed with flat files, merged/3D/2D
+pairing intact, and 2000 screenshots (6000 files) scanned in ~5ms on a
+desktop.
+
+Not changed, same class of problem: the DS SD-card scan (`ds_scan_extracted`)
+also stops at its cap (`MAX_DS_SHOTS`, 256) in directory order.
+
+
+## Raising the limit to 2048 (and what that required)
+
+256 was an arbitrary number, and a screenshot manager shouldn't make people
+pick which part of their history to lose. But the limit couldn't just be
+bumped, because three things scaled with it:
+
+- **Thumbnail memory.** Built thumbnails (8KB texture each) were only ever
+  released when the whole list changed, never while scrolling, so memory
+  grew with how far you had scrolled. At 2048 that is a 16MB worst case.
+  `evict_far_thumbnails` now releases everything outside the viewport plus
+  `THUMB_KEEP_ROWS` (3) rows either side, and only runs when the scroll
+  position changes. Modelled with 20,000 random scroll steps over 2048 items:
+  1564 thumbnails built over time, never more than 28 alive at once (bound:
+  40), and no visible cell ever missing one. Evicted thumbnails rebuild when
+  you scroll back, usually from the on-disk cache.
+- **Sort cost.** `qsort` on whole 834-byte records moves roughly n log n of
+  them -- ~19MB of copying at 2048, on every scan (boot, every delete).
+  `sort_newest_first` sorts an index array and moves each record once. If
+  the temporary buffers can't be allocated it falls back to the old sort.
+- **A latent overrun.** `s_visibleIndices`, `s_thumbs` and `s_batchSelected`
+  are indexed by *item* index, and in DS mode that runs up to
+  `MAX_DS_SHOTS` (256). With a limit of 64, anyone with more than 64
+  extracted DS screenshots (two "Extract All" runs would do it) was writing
+  past the end of those arrays. Raising the limit happened to cover it, but
+  nothing enforced that. Now `MAX_PAIRS >= MAX_DS_SHOTS` is a compile-time
+  assertion (verified to reject a limit of 64), and `rebuild_visible_list`
+  no longer writes past the array.
+
+Unchanged by the limit: the thumbnail *cache* stays at 64 entries
+(`THUMB_CACHE_MAX`), because it is rewritten whole on every save.
+
+Costs, none measured on a real console: the pair list is ~1.7MB of static RAM
+(834 bytes x 2048), plus a transient ~1.7MB for the index-sort copy and
+~0.8MB of name lists during a scan at the limit. If memory turns out to be
+tight on an Old 3DS, `MAX_PAIRS` is the single knob (1024 halves all of it).
+Beyond the limit the oldest screenshots are not shown.
+
+
+## Top and bottom update in the same frame while peeking
+
+Flipping screenshots with R held used to load the top preview first and the
+bottom frame a few frames later: the loader has one pending slot, so the
+bottom request had to wait until the preview had landed (see above).
+
+The two images can't be decoded at the same time. The loader thread shares
+the single CPU core with the main thread on an Old 3DS, so the decodes are
+always one after the other. What can be changed is when they *appear*:
+`LoaderJob` now has an optional third image (`pathBottom` / `needBottom`) and
+`LoaderResult` an optional `dataBottom`. While peeking (`s_peekActive`,
+set from the input handler each frame), `update_live_preview` requests the
+bottom frame inside the same job as the preview, and applies both in the same
+call, so both screens change in one frame.
+
+Trade-offs, none measured on hardware:
+- The top screen now waits for the bottom image's decode before updating,
+  while peeking only. The bottom frame itself arrives no later than before.
+- The result holds a third swizzled buffer (~512KB), so peak transient memory
+  while peeking is ~512KB higher than when the two were loaded separately.
+- The bottom decode is optional, like the right eye: if it fails the top
+  preview still lands and the bottom frame is requested again on its own, as
+  before.
+- Without R held nothing changes: `pathBottom` is NULL and the job is
+  identical to before.
+
+Process note: `ui.c` can't be built here (no 3DS headers), but running it
+through the compiler with throwaway stubs and filtering for errors involving
+the changed identifiers is enough to catch declaration-order and
+argument-count mistakes. It caught one in this very change (the bottom-frame
+index variables were used before their declaration), which is the same class
+of mistake that broke a build earlier. The ~195 other diagnostics are all
+missing 3DS library symbols.
+
+### DS widescreen timing
+
+`current_ds_widescreen()` now reads the loaded preview (`s_previewLoadedPairIndex`) instead of the selection, so the stretch is only applied once the new texture is on screen. The L toggle is gated on `current_preview_ready()` so it always affects the screenshot being shown.
